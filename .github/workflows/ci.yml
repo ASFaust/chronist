@@ -16,7 +16,7 @@ jobs:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.4.0  # no floating major tags for this action
       - name: Install
         run: |
           uv venv -p ${{ matrix.python }} .venv
