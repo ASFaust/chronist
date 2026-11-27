@@ -16,9 +16,12 @@ case for compression.
 | sqlite_rows | 1M | 20,000,000 | 32.5 | 718,024 | 323.5 / 333.2 | 7.1 / 7.1 | - | 423.3 |
 | chunked | 1M | 20,000,000 | 9.8 | 451,133 | 1.7 / 2.0 | 3.2 / 7.1 | - | 389.5 |
 | sqlite_rows | 10M | 200,000,000 | 32.2 | 714,126 | 3,754.3 / 3,811.9 | 35.2 / 37.7 | - | 2,096.6 |
+| chunked | 10M | 200,000,000 | 9.1 | 370,123 | 2.2 / 2.6 | 24.1 / 58.2 | - | 1,841.2 |
 
 Notes
 - Concurrent SQLite reads in one process were ~8x *slower* than serial on this
   machine (likely the global allocator mutex), so the server reads serially and
   caches immutable results instead (`store/cache.py`).
-- chunked 10M not measured yet.
+- Peak RSS in the 10M rows is mostly the benchmark's own producer threads holding the generated
+  curves, not the store.
+- `chunked` is the default backend for new data dirs.
