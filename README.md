@@ -4,12 +4,13 @@ A lightweight, self-hostable experiment tracker for ML research: log training
 runs, compare learning curves, and read data back in Python for custom plots.
 One `pip install`, single user, runs on a laptop or on a small VPS.
 
-The design rules come from problems with other tools (see [docs/SPEC.md](docs/SPEC.md)):
+The design rules come from problems with other tools (see [docs/SPEC.md](https://github.com/ASFaust/chronist/blob/main/docs/SPEC.md)):
 the server is the **only** process that writes storage, plots are always
 downsampled on the server, and the query language never evals Python.
 
 ```
-pip install -e .            # from this repo; extras: [pandas], [polars], [export], [dev]
+pip install chronist            # extras: [pandas], [polars], [export] (pyarrow), [all]
+pip install -e ".[dev]"        # from a checkout, for development
 ```
 
 ## Logging
@@ -132,7 +133,7 @@ Differences from the spec in `docs/HISTOGRAMS_FILES.md`:
 ## Code snapshots
 
 Every run records exactly which code ran, including uncommitted and untracked
-files (details: [docs/CODE_SNAPSHOTS.md](docs/CODE_SNAPSHOTS.md)).
+files (details: [docs/CODE_SNAPSHOTS.md](https://github.com/ASFaust/chronist/blob/main/docs/CODE_SNAPSHOTS.md)).
 
 ```python
 chronist.init(code="auto")      # default: git root, else nearest pyproject/setup.py, else the script's dir
@@ -314,4 +315,21 @@ uv venv -p 3.9 .venv && uv pip install -p .venv -e ".[dev]"
 .venv/bin/python bench/bench_store.py --scenario 100k,grouped,1M
 ```
 
-Benchmark results are in [bench/RESULTS.md](bench/RESULTS.md).
+Benchmark results are in [bench/RESULTS.md](https://github.com/ASFaust/chronist/blob/main/bench/RESULTS.md).
+
+## Releasing
+
+Publishing goes to PyPI through GitHub Actions trusted publishing (no API
+token):
+
+1. Bump `__version__` in `chronist/__init__.py`, commit, push.
+2. Create a GitHub Release with tag `v<version>` (e.g. `v0.1.0`).
+
+`.github/workflows/publish.yml` then runs the tests (Python 3.9–3.13), builds
+the sdist and wheel, checks that the tag matches the version, and uploads.
+`ci.yml` runs the tests on every push and pull request.
+
+## License
+
+MIT. Bundled UI libraries keep their own licenses (uPlot: MIT, htm/Preact:
+Apache-2.0/MIT, highlight.js: BSD-3-Clause); see `chronist/ui/static/vendor/`.

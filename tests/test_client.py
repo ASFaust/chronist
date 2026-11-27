@@ -68,7 +68,8 @@ def wait_for(cond, timeout=10):
     return False
 
 
-def test_online_logging(server):
+def test_online_logging(server, monkeypatch):
+    monkeypatch.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # a git checkout
     run = chronist.init(project="p", name="r1", url=server.url, tags=["t"],
                         config={"model": {"arch": "lstm"}, "lr": 1e-3})
     for i in range(1000):

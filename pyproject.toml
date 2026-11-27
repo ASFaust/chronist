@@ -1,13 +1,33 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "chronist"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Lightweight, self-hostable experiment tracker for ML research"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE", "chronist/ui/static/vendor/LICENSE.*", "chronist/ui/static/vendor/hljs/LICENSE"]
+authors = [{ name = "Andreas Faust" }]
+keywords = ["experiment tracking", "machine learning", "mlops", "metrics", "wandb", "tensorboard"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Monitoring",
+]
 dependencies = [
     "numpy>=1.22",
     "msgpack>=1.0",
@@ -23,10 +43,19 @@ dependencies = [
 pandas = ["pandas>=1.5"]
 polars = ["polars>=0.20"]
 export = ["pyarrow>=12"]
-dev = ["pytest", "pytest-xdist", "pandas", "polars", "pyarrow"]
+all = ["pandas>=1.5", "polars>=0.20", "pyarrow>=12"]
+dev = ["pytest", "pytest-xdist", "pandas", "polars", "pyarrow", "build", "twine"]
+
+[project.urls]
+Homepage = "https://github.com/ASFaust/chronist"
+Repository = "https://github.com/ASFaust/chronist"
+Issues = "https://github.com/ASFaust/chronist/issues"
 
 [project.scripts]
 chronist = "chronist.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "chronist.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["chronist*"]
