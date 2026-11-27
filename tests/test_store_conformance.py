@@ -194,3 +194,40 @@ def test_cache_invalidation(tmp_path):
     s.delete_run(1)
     assert len(s.read(1, "x", max_points=10)) == 0
     s.close()
+
+
+def test_raw_limit_paging(store):
+    store.write(1, pts("x", range(0, 1000, 3)))
+    got, start = [], None
+    while True:
+        b = store.read(1, "x", start, None, None, limit=37)
+        assert len(b) <= 37
+        if len(b) == 0:
+            break
+        got.extend(b.step.tolist())
+        start = int(b.step[-1]) + 1
+    assert got == list(range(0, 1000, 3))
+    assert len(store.read(1, "x", 10, 20, None, limit=100)) == 3
+    assert len(store.read(1, "x", max_points=10, limit=1)) <= 10  # limit ignored for downsampled reads
+
+
+def test_delete_range(store):
+    store.write(1, {**pts("a", range(100)), **pts("b", range(50, 60)), **pts("c", range(0, 10))})
+    store.write(2, pts("a", range(100)))
+    store.maintain()
+    store.delete_range(1, 55)
+    s, _ = raw(store, 1, "a")
+    assert s.tolist() == list(range(55))
+    assert store.read(1, "a", max_points=7).count.sum() == 55
+    assert store.keys(1) == ["a", "b", "c"]
+    assert store.last(1, ["a", "b", "c"]) == {"a": (54, 54 * 0.5 + 1), "b": (54, 54 * 0.5 + 1), "c": (9, 9 * 0.5 + 1)}
+    assert store.step_range(1, "b") == (50, 54)
+    store.delete_range(1, 50)
+    assert store.keys(1) == ["a", "c"] and store.step_range(1, "b") is None
+    assert len(raw(store, 2, "a")[0]) == 100  # other runs untouched
+    # writing after a rewind: the new values win (the old ones are gone)
+    store.write(1, pts("a", range(40, 70), np.full(30, 7.0)))
+    s, v = raw(store, 1, "a")
+    assert s.tolist() == list(range(70)) and v[60] == 7.0 and v[45] == 45 * 0.5 + 1  # <50 kept, first write wins
+    assert store.last(1, ["a"]) == {"a": (69, 7.0)}
+    assert store.stats().points == 70 + 10 + 100

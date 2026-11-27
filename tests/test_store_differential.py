@@ -59,6 +59,10 @@ def test_random_against_oracle(tmp_path, seed):
         if rng.random() < 0.1:
             for st in cands:
                 st.maintain()
+        if rng.random() < 0.04 and pos > 10:  # rewind a run
+            rr, cut = int(rng.integers(1, 3)), int(rng.integers(0, pos))
+            for st in [oracle] + cands:
+                st.delete_range(rr, cut)
     for st in cands:
         assert st.stats().points == oracle.stats().points
     for run in (1, 2):
@@ -89,5 +93,9 @@ def test_random_against_oracle(tmp_path, seed):
                         assert got.step[-1] == want.step[-1], ctx
             for st in cands:
                 assert st.last(run, [key]) == oracle.last(run, [key])
+                assert st.step_range(run, key) == oracle.step_range(run, key)
+                lim = int(rng.integers(1, 300))
+                a = oracle.read(run, key, None, None, None, limit=lim)
+                assert_same(st.read(run, key, None, None, None, limit=lim), a, f"limit={lim}")
     for st in [oracle] + cands:
         st.close()

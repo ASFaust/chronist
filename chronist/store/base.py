@@ -150,8 +150,15 @@ class MetricStore(Protocol):
         """Write a batch. Idempotent: duplicate (run, key, step) is ignored."""
 
     def read(self, run_id: int, key: str, start: Optional[int] = None,
-             end: Optional[int] = None, max_points: Optional[int] = None) -> Buckets:
-        """max_points=None -> raw points; otherwise <= max_points buckets."""
+             end: Optional[int] = None, max_points: Optional[int] = None,
+             limit: Optional[int] = None) -> Buckets:
+        """max_points=None -> raw points; otherwise <= max_points buckets.
+        limit (raw reads only): return at most the first ``limit`` points of
+        the range; page with start = last step + 1."""
+
+    def delete_range(self, run_id: int, start: int) -> None:
+        """Delete every point with step >= start, for all keys of the run
+        (rewind). keys/last/step_range reflect what remains."""
 
     def keys(self, run_id: int) -> List[str]: ...
 

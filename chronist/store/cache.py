@@ -16,7 +16,10 @@ from .base import Buckets, MetricStore, Points, StoreStats
 
 
 class CachingStore:
-    def __init__(self, inner: MetricStore, max_buckets: int = 4_000_000):
+    BYTES_PER_BUCKET = 64  # 7-8 float64/int64 arrays
+
+    def __init__(self, inner: MetricStore, max_mb: float = 64.0):
+        max_buckets = int(max_mb * 1024 * 1024 / self.BYTES_PER_BUCKET)
         self.inner = inner
         self.max_buckets = max_buckets
         self._lru: "OrderedDict[tuple, Buckets]" = OrderedDict()
@@ -45,8 +48,15 @@ class CachingStore:
         self.inner.delete_run(run_id)
         self._invalidate(run_id)
 
+    def delete_range(self, run_id: int, start: int) -> None:
+        self.inner.delete_range(run_id, start)
+        self._invalidate(run_id)
+
     def read(self, run_id: int, key: str, start: Optional[int] = None,
-             end: Optional[int] = None, max_points: Optional[int] = None) -> Buckets:
+             end: Optional[int] = None, max_points: Optional[int] = None,
+             limit: Optional[int] = None) -> Buckets:
+        if max_points is None:  # raw reads are for export/read-back: don't cache
+            return self.inner.read(run_id, key, start, end, None, limit)
         ck = (run_id, key, start, end, max_points)
         with self._lock:
             b = self._lru.get(ck)

@@ -448,6 +448,65 @@ class ChunkedStore:
         for k in [k for k in self._hot_n if k[0] == run_id]:
             del self._hot_n[k]
 
+    def delete_range(self, run_id: int, start: int) -> None:
+        start = int(start)
+
+        def _del(con):
+            con.execute("DELETE FROM hot WHERE run_id=? AND step>=?", (run_id, start))
+            for (kid,) in con.execute("SELECT key_id FROM series WHERE run_id=?", (run_id,)).fetchall():
+                # level 0: drop chunks entirely past the cut, truncate the one straddling it
+                con.execute("DELETE FROM chunks WHERE run_id=? AND key_id=? AND level=0 AND start>=?",
+                            (run_id, kid, start))
+                row = con.execute("SELECT start, data FROM chunks WHERE run_id=? AND key_id=? AND level=0 "
+                                  "AND last>=? ORDER BY start", (run_id, kid, start)).fetchone()
+                if row is not None:
+                    s, v, w = decode(row[1], RAW_DT, RAW_DELTA)
+                    k = int(np.searchsorted(s, start))
+                    con.execute("DELETE FROM chunks WHERE run_id=? AND key_id=? AND level=0 AND start=?",
+                                (run_id, kid, row[0]))
+                    if k:
+                        con.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                                    (run_id, kid, 0, int(s[0]), int(s[k - 1]), k, encode([s[:k], v[:k], w[:k]], RAW_DELTA)))
+                # pyramid: drop every bucket at or after the cut (the straddling one is now incomplete)
+                for level in range(1, MAX_LEVEL + 1):
+                    kcut = start // FANOUT ** level
+                    con.execute("DELETE FROM chunks WHERE run_id=? AND key_id=? AND level=? AND start>?",
+                                (run_id, kid, level, kcut // self.chunk))
+                    row = con.execute("SELECT data FROM chunks WHERE run_id=? AND key_id=? AND level=? AND start=?",
+                                      (run_id, kid, level, kcut // self.chunk)).fetchone()
+                    if row is not None:
+                        kept = Agg(*decode(row[0], AGG_DT, AGG_DELTA)).select(-(2 ** 62), kcut)
+                        con.execute("DELETE FROM chunks WHERE run_id=? AND key_id=? AND level=? AND start=?",
+                                    (run_id, kid, level, kcut // self.chunk))
+                        if len(kept):
+                            con.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?,?)",
+                                        (run_id, kid, level, kcut // self.chunk, int(kept.idx[-1]), len(kept),
+                                         encode(kept.arrays(), AGG_DELTA)))
+                # watermark + summary from what remains
+                last0 = con.execute("SELECT max(last), min(start) FROM chunks WHERE run_id=? AND key_id=? AND level=0",
+                                    (run_id, kid)).fetchone()
+                hot = con.execute("SELECT min(step), max(step) FROM hot WHERE run_id=? AND key_id=?",
+                                  (run_id, kid)).fetchone()
+                firsts = [x for x in (last0[1], hot[0]) if x is not None]
+                lasts = [x for x in (last0[0], hot[1]) if x is not None]
+                if not lasts:
+                    con.execute("DELETE FROM series WHERE run_id=? AND key_id=?", (run_id, kid))
+                    continue
+                last_step = max(lasts)
+                hv = con.execute("SELECT value FROM hot WHERE run_id=? AND key_id=? AND step=?",
+                                 (run_id, kid, last_step)).fetchone()
+                if hv is not None:
+                    last_value = hv[0]
+                else:
+                    blob = con.execute("SELECT data FROM chunks WHERE run_id=? AND key_id=? AND level=0 AND last=?",
+                                       (run_id, kid, last_step)).fetchone()[0]
+                    lv = float(decode(blob, RAW_DT, RAW_DELTA)[1][-1])
+                    last_value = None if lv != lv else lv
+                con.execute("UPDATE series SET sealed_upto=?, first_step=?, last_step=?, last_value=? "
+                            "WHERE run_id=? AND key_id=?", (last0[0], min(firsts), last_step, last_value, run_id, kid))
+                self._hot_n.pop((run_id, kid), None)
+        self._tx(_del)
+
     def flush(self) -> None:
         pass
 
@@ -495,18 +554,38 @@ class ChunkedStore:
         return None if row is None else (row[0], row[1])
 
     def read(self, run_id: int, key: str, start: Optional[int] = None,
-             end: Optional[int] = None, max_points: Optional[int] = None) -> Buckets:
+             end: Optional[int] = None, max_points: Optional[int] = None,
+             limit: Optional[int] = None) -> Buckets:
         con = self._rcon()
         kid = self._key_id(con, key, create=False)
         if kid is None:
             return Buckets.empty()
         con.execute("BEGIN")  # one snapshot for all queries below
         try:
-            return self._read(con, run_id, kid, start, end, max_points)
+            return self._read(con, run_id, kid, start, end, max_points, limit)
         finally:
             con.execute("COMMIT")
 
-    def _read(self, con, run_id, kid, start, end, max_points) -> Buckets:
+    def _raw_limited(self, con, run_id, kid, lo, hi, limit):
+        """First ``limit`` points in [lo, hi), decoding only the chunks needed."""
+        ss, vs, ws, n = [], [], [], 0
+        cut = hi
+        for (blob,) in con.execute(
+                "SELECT data FROM chunks WHERE run_id=? AND key_id=? AND level=0 AND last>=? AND start<? "
+                "ORDER BY start", (run_id, kid, lo, hi)):
+            s, v, w = decode(blob, RAW_DT, RAW_DELTA)
+            a, b = np.searchsorted(s, [lo, hi])
+            ss.append(s[a:b]); vs.append(v[a:b]); ws.append(w[a:b])
+            n += b - a
+            if n >= limit:
+                cut = int(s[b - 1]) + 1  # hot points beyond this can't be in the first `limit`
+                break
+        sealed = (np.concatenate(ss), np.concatenate(vs), np.concatenate(ws)) if ss else \
+            (np.zeros(0, I64), np.zeros(0, F64), np.zeros(0, F64))
+        s, v, w = merge_points(sealed, self._hot_points(con, run_id, kid, lo, cut))
+        return s[:limit], v[:limit], w[:limit]
+
+    def _read(self, con, run_id, kid, start, end, max_points, limit=None) -> Buckets:
         row = self._series_row(con, run_id, kid)
         if row is None:
             return Buckets.empty()
@@ -525,8 +604,13 @@ class ChunkedStore:
 
         hs, hv, hw = self._hot_points(con, run_id, kid, lo, hi)
         if w == 1:
-            ss, sv, sw = self._sealed_points(con, run_id, kid, lo, hi)
-            s, v, wt = merge_points((ss, sv, sw), (hs, hv, hw))
+            if limit is not None and max_points is None:
+                s, v, wt = self._raw_limited(con, run_id, kid, lo, hi, int(limit))
+            else:
+                ss, sv, sw = self._sealed_points(con, run_id, kid, lo, hi)
+                s, v, wt = merge_points((ss, sv, sw), (hs, hv, hw))
+            if len(s) == 0:
+                return Buckets.empty()
             return Buckets.from_raw(s, v, None if np.isnan(wt).all() else wt)
 
         level = 0

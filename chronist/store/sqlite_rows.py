@@ -152,6 +152,31 @@ class SqliteRowStore:
             if own_tx:
                 con.execute("COMMIT")
 
+    def delete_range(self, run_id: int, start: int) -> None:
+        with self._wlock:
+            con = self._writer()
+            own_tx = not con.in_transaction
+            if own_tx:
+                con.execute("BEGIN")
+            try:
+                con.execute("DELETE FROM points WHERE run_id=? AND step>=?", (run_id, int(start)))
+                for (kid,) in con.execute("SELECT key_id FROM run_keys WHERE run_id=?", (run_id,)).fetchall():
+                    lo, hi = con.execute("SELECT min(step), max(step) FROM points WHERE run_id=? AND key_id=?",
+                                         (run_id, kid)).fetchone()
+                    if lo is None:
+                        con.execute("DELETE FROM run_keys WHERE run_id=? AND key_id=?", (run_id, kid))
+                        continue
+                    v = con.execute("SELECT value FROM points WHERE run_id=? AND key_id=? AND step=?",
+                                    (run_id, kid, hi)).fetchone()[0]
+                    con.execute("UPDATE run_keys SET first_step=?, last_step=?, last_value=? "
+                                "WHERE run_id=? AND key_id=?", (lo, hi, v, run_id, kid))
+                if own_tx:
+                    con.execute("COMMIT")
+            except BaseException:
+                if own_tx:
+                    con.execute("ROLLBACK")
+                raise
+
     def flush(self) -> None:
         pass
 
@@ -186,7 +211,8 @@ class SqliteRowStore:
         return None if row is None else (row[0], row[1])
 
     def read(self, run_id: int, key: str, start: Optional[int] = None,
-             end: Optional[int] = None, max_points: Optional[int] = None) -> Buckets:
+             end: Optional[int] = None, max_points: Optional[int] = None,
+             limit: Optional[int] = None) -> Buckets:
         con = self._rcon()
         kid = self._key_id(con, key, create=False)
         if kid is None:
@@ -209,11 +235,19 @@ class SqliteRowStore:
             width = bucket_width(eff_lo, eff_hi, max_points)
 
         if width == 1:
-            rows = con.execute(
-                f"SELECT step, value, wall FROM points WHERE {where} ORDER BY step", args).fetchall()
-            if not rows:
+            sql = f"SELECT step, value, wall FROM points WHERE {where} ORDER BY step"
+            if limit is not None and max_points is None:
+                sql += f" LIMIT {int(limit)}"
+            cur = con.execute(sql, args)
+            parts = []
+            while True:  # convert in batches: a list of 10M tuples would cost GBs
+                rows = cur.fetchmany(100_000)
+                if not rows:
+                    break
+                parts.append(np.array(rows, dtype=np.float64))  # None -> nan
+            if not parts:
                 return Buckets.empty()
-            a = np.array(rows, dtype=np.float64)  # None -> nan
+            a = parts[0] if len(parts) == 1 else np.concatenate(parts)
             wall = a[:, 2] if not np.isnan(a[:, 2]).all() else None
             return Buckets.from_raw(a[:, 0].astype(np.int64), a[:, 1], wall)
 
