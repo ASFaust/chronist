@@ -303,7 +303,8 @@ export function HistPanel({ panel, runs, slots, keys, onChange, onRemove, live, 
     <div class=${"panel" + (expanded ? " expanded" : "")}>
       <div class="panel-head">
         <span class="chip">histogram</span>
-        <${Select} label="Key" value=${panel.key || ""} options=${[{ value: "", label: "choose…" }, ...keys.hists.map((k) => ({ value: k }))]}
+        <${Select} label="Key" value=${panel.key || ""} options=${[{ value: "", label: "choose…" },
+          ...[...new Set([...keys.hists, ...(panel.key ? [panel.key] : [])])].map((k) => ({ value: k }))]}
           onChange=${(v) => set({ key: v, range: null, step: null })} />
         <${Select} label="View" value=${panel.view} options=${VIEWS} onChange=${(v) => set({ view: v })} />
         ${panel.view === "heatmap" && html`<${Toggle} label="log color" value=${!!panel.logColor} onChange=${(v) => set({ logColor: v })} />

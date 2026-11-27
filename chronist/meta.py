@@ -590,7 +590,7 @@ class MetadataStore:
                     "id": row[0], "uid": row[1], "project": row[2], "name": row[3], "status": row[4],
                     "created": row[5], "updated": row[6], "heartbeat": row[7], "finished": row[8],
                     "notes": row[9], "steps": row[10], "meta": json.loads(row[11]),
-                    "tags": [], "config": {}, "summary": {}, "code": None,
+                    "tags": [], "config": {}, "summary": {}, "code": None, "hists": [],
                 }
             if "tags" in include:
                 for rid, tag in con.execute(f"SELECT run_id, tag FROM tags WHERE run_id IN ({q}) ORDER BY tag", chunk):
@@ -601,6 +601,8 @@ class MetadataStore:
                     out[rid]["config"][k] = decode_value(vt, vtext, vnum)
             for rid, mh in con.execute(f"SELECT run_id, manifest FROM run_code WHERE run_id IN ({q})", chunk):
                 out[rid]["code"] = mh
+            for rid, k in con.execute(f"SELECT run_id, key FROM hist_keys WHERE run_id IN ({q}) ORDER BY key", chunk):
+                out[rid]["hists"].append(k)
             if "summary" in include:
                 for rid, k, st, v in con.execute(
                         f"SELECT run_id, key, step, value FROM summary WHERE run_id IN ({q}) ORDER BY key", chunk):

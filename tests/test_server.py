@@ -286,3 +286,20 @@ def test_group_by_prefixed_names(client):
     assert groups("config.config.lr") == (200, [(1,), (2,)])           # sub-config named "config"
     assert groups("tags") == (200, [("",), ("x",)])
     assert groups("lr")[0] == 400 and groups("metric.x")[0] == 400     # unprefixed / not groupable
+
+
+def test_run_records_list_their_histogram_keys(client):
+    import numpy as np
+
+    from chronist import hist as H
+    a = mkrun(client, uid="ha")["id"]
+    b = mkrun(client, uid="hb")["id"]
+    rec = H.compute(np.arange(10.0), 0).to_wire()
+    rec["counts"] = list(np.frombuffer(rec["counts"], dtype="<u4"))
+    client.post(f"/api/runs/{a}/log", json={"points": {"loss": {"step": [0], "value": [1.0]}},
+                                            "hists": [{"key": "w/l1", **{k: (v.tolist() if hasattr(v, "tolist") else v)
+                                                                         for k, v in rec.items() if k != "counts"},
+                                                       "counts": [int(c) for c in rec["counts"]]}]})
+    runs = {r["id"]: r for r in client.get("/api/runs", params={"project": "p"}).json()["runs"]}
+    assert runs[a]["hists"] == ["w/l1"] and set(runs[a]["summary"]) == {"loss"}
+    assert runs[b]["hists"] == [] and runs[b]["summary"] == {}

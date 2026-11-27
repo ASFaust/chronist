@@ -125,13 +125,27 @@ function App() {
     return out;
   }, [runs, sort]);
   const runsById = useMemo(() => new Map(runs.map((r) => [r.id, r])), [runs]);
-  const plotRuns = useMemo(() => {
-    if (selected.size) return sortedRuns.filter((r) => selected.has(r.id));
-    return sortedRuns.slice(0, PLOT_DEFAULT_N);
-  }, [sortedRuns, selected]);
+  // Only selected runs that the current filter shows count; if none do (e.g. the
+  // selection predates a new query), fall back to the filtered runs.
+  const visibleSelected = useMemo(() => sortedRuns.filter((r) => selected.has(r.id)), [sortedRuns, selected]);
+  const hiddenSelected = selected.size - visibleSelected.length;
+  const plotRuns = useMemo(() => visibleSelected.length ? visibleSelected : sortedRuns.slice(0, PLOT_DEFAULT_N),
+                           [visibleSelected, sortedRuns]);
   // Grouped panels aggregate over everything that matches unless runs are selected.
-  const groupRuns = useMemo(() => selected.size ? plotRuns : sortedRuns.slice(0, 1000), [plotRuns, sortedRuns, selected]);
+  const groupRuns = useMemo(() => visibleSelected.length ? visibleSelected : sortedRuns.slice(0, 1000),
+                            [visibleSelected, sortedRuns]);
   const slots = useMemo(() => new Map(slotsRef.current.assign(plotRuns.map((r) => r.id))), [plotRuns]);
+  // Plot panels offer only metrics / histogram keys that the filtered runs have data for.
+  const panelKeys = useMemo(() => {
+    const mc = new Map(), hc = new Map();
+    for (const r of runs) {
+      for (const k of Object.keys(r.summary || {})) mc.set(k, (mc.get(k) || 0) + 1);
+      for (const k of r.hists || []) hc.set(k, (hc.get(k) || 0) + 1);
+    }
+    const byName = (a, b) => a.localeCompare(b, undefined, { numeric: true });
+    return { ...keys, metrics: [...mc.keys()].sort(byName), hists: [...hc.keys()].sort(byName),
+             metricCounts: mc, histCounts: hc, nRuns: runs.length };
+  }, [runs, keys]);
 
   // ---- handlers ----
   function onToggle(id, e) {
@@ -241,19 +255,21 @@ run.finish()</pre>
       <div class="splitter" onMouseDown=${startSplit} title="Drag to resize"></div>
       <section class="panels-pane">
         <div class="panels-bar">
-          <span class="muted">${selected.size ? `Plotting ${plotRuns.length} selected runs`
-            : `Plotting the first ${plotRuns.length} matching runs (select runs to choose); grouped panels use all matches`}</span>
+          <span class="muted">${visibleSelected.length ? `Plotting ${plotRuns.length} selected runs`
+            : `Plotting the first ${plotRuns.length} matching runs (select runs to choose); grouped panels use all matches`}
+            ${hiddenSelected > 0 && html` · <a href="#" onClick=${(e) => { e.preventDefault(); setSelected(new Set(visibleSelected.map((r) => r.id))); }}
+              title="These runs are selected but don't match the current filter">${hiddenSelected} selected run${hiddenSelected > 1 ? "s" : ""} hidden by the filter (clear)</a>`}</span>
           <span class="spacer"></span>
-          <button class="btn small" onClick=${() => setPanels([...(panels || []), newPanel(keys.metrics.slice(0, 1))])}>+ Panel</button>
-          ${(keys.hists || []).length > 0 && html`<button class="btn small ghost" onClick=${() => setPanels([...(panels || []), newHistPanel(keys.hists[0])])}>+ Histogram</button>`}
+          <button class="btn small" onClick=${() => setPanels([...(panels || []), newPanel(panelKeys.metrics.slice(0, 1))])}>+ Panel</button>
+          ${panelKeys.hists.length > 0 && html`<button class="btn small ghost" onClick=${() => setPanels([...(panels || []), newHistPanel(panelKeys.hists[0])])}>+ Histogram</button>`}
         </div>
         <div class="panels">
           ${(panels || []).map((p) => p.type === "hist" ? html`
-            <${HistPanel} key=${p.id} panel=${p} runs=${plotRuns} slots=${slots} keys=${keys} live=${live}
+            <${HistPanel} key=${p.id} panel=${p} runs=${plotRuns} slots=${slots} keys=${panelKeys} live=${live}
               expanded=${expanded === p.id} onExpand=${() => setExpanded(expanded === p.id ? null : p.id)}
               onChange=${(patch) => updatePanel(p.id, patch)} onRemove=${() => removePanel(p.id)} />` : html`
             <${Panel} key=${p.id} panel=${p} runs=${p.group.length ? groupRuns : plotRuns} runsById=${runsById}
-              slots=${slots} keys=${keys} live=${live}
+              slots=${slots} keys=${panelKeys} live=${live}
               expanded=${expanded === p.id} onExpand=${() => setExpanded(expanded === p.id ? null : p.id)}
               onChange=${(patch) => updatePanel(p.id, patch)} onRemove=${() => removePanel(p.id)} />`)}
         </div>

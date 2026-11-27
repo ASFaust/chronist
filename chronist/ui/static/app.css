@@ -120,11 +120,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); margi
 .td { padding: 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .td.name { display: flex; align-items: center; gap: 6px; }
-.td.name a { overflow: hidden; text-overflow: ellipsis; color: var(--text); font-weight: 500; }
+.td.name a { overflow: hidden; text-overflow: ellipsis; color: var(--text); font-weight: 500; flex: 0 1 auto; min-width: 3.5em; }
 .td.name a:hover { color: var(--accent); }
 .swatch { width: 18px; height: 8px; flex: none; }
 .swatch.empty { display: inline-block; }
-.tags { display: inline-flex; gap: 3px; }
+.tags { display: inline-flex; gap: 3px; overflow: hidden; min-width: 0; flex: 0 100 auto; }
+.td.name .tag { flex-shrink: 0; }
 .tag { display: inline-flex; align-items: center; gap: 2px; padding: 0 6px; border-radius: 10px; background: var(--surface-2);
        border: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); line-height: 18px; }
 .tag button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 0 0 2px; }

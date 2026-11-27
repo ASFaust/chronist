@@ -349,12 +349,20 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
   }
 
   // ---- controls ----
-  const metricOpts = keys.metrics.map((m) => ({ value: m }));
+  // metrics of the filtered runs (with how many have them), plus anything already selected
+  const runsWith = (m) => (keys.metricCounts ? keys.metricCounts.get(m) || 0 : null);
+  const countLabel = (m) => {
+    const n = runsWith(m);
+    return n == null ? "" : n === 0 ? "not in filtered runs" : n === keys.nRuns ? "all runs" : `${n}/${keys.nRuns} runs`;
+  };
+  const metricNames = [...new Set([...keys.metrics, ...panel.keys])];
+  const metricOpts = metricNames.map((m) => ({ value: m, kind: countLabel(m) }));
   const configOpts = keys.config.map((k) => ({ value: configCol(k.key), kind: `${k.distinct}` }));
   const groupOpts = keys.config.map((k) => ({ value: configCol(k.key), label: configCol(k.key), kind: `${k.distinct}` }));
   const xOpts = [{ value: "step", label: "Step" }, { value: "wall", label: "Wall time" },
                  { value: "relative", label: "Relative time" },
-                 ...keys.metrics.map((m) => ({ value: m, label: m }))];
+                 ...[...new Set([...keys.metrics, ...(["step", "wall", "relative"].includes(panel.x) ? [] : [panel.x])])]
+                   .map((m) => ({ value: m, label: m }))];
   const set = (patch) => onChange(patch);
   const legend = lines;
 
@@ -387,6 +395,8 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
         ${!panel.keys.length && html`<div class="chart-empty">Choose metrics to plot</div>`}
         ${panel.keys.length > 0 && !runIds.length && html`<div class="chart-empty">No runs to plot</div>`}
         ${err && html`<div class="chart-empty error">${err}</div>`}
+        ${!err && !loading && data && panel.keys.length > 0 && runIds.length > 0 && lines.every((l) => !l.xs || l.xs.length === 0) &&
+          html`<div class="chart-empty">None of the ${runIds.length} plotted runs has data for ${panel.keys.join(", ")}</div>`}
       </div>
       <div class="tip" ref=${tip}></div>
       ${legend.length > 0 && html`
