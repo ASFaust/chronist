@@ -319,15 +319,20 @@ Benchmark results are in [bench/RESULTS.md](https://github.com/ASFaust/chronist/
 
 ## Releasing
 
-Publishing goes to PyPI through GitHub Actions trusted publishing (no API
-token):
+Releases are automatic. Work happens on `dev` (or feature branches; `ci.yml`
+tests every push and PR there). Every push to `main` runs
+`.github/workflows/publish.yml`:
 
-1. Bump `__version__` in `chronist/__init__.py`, commit, push.
-2. Create a GitHub Release with tag `v<version>` (e.g. `v0.1.0`).
+1. tests on Python 3.9–3.13;
+2. the next version, from the latest `vX.Y.Z` tag: a patch bump by default,
+   `[minor]` or `[major]` in any pushed commit message bumps more, and
+   `[skip release]` releases nothing;
+3. build (the version comes from the tag via `setuptools-scm`) and upload to
+   PyPI via trusted publishing;
+4. only then, push the tag and create the GitHub Release with generated notes.
 
-`.github/workflows/publish.yml` then runs the tests (Python 3.9–3.13), builds
-the sdist and wheel, checks that the tag matches the version, and uploads.
-`ci.yml` runs the tests on every push and pull request.
+A manual run (Actions → publish → Run workflow) can choose the bump. Between
+releases, local builds get development versions like `0.1.1.dev3+g1a2b3c4`.
 
 ## License
 

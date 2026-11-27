@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -54,8 +54,10 @@ Issues = "https://github.com/ASFaust/chronist/issues"
 [project.scripts]
 chronist = "chronist.cli:main"
 
-[tool.setuptools.dynamic]
-version = { attr = "chronist.__version__" }
+[tool.setuptools_scm]
+# The version comes from git tags (vX.Y.Z), set by the release workflow.
+version_file = "chronist/_version.py"
+fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
 include = ["chronist*"]

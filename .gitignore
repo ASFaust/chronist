@@ -7,3 +7,4 @@ dist/
 .pytest_cache/
 .chronist/
 bench/results/
+chronist/_version.py

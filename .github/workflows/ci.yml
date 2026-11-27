@@ -1,10 +1,12 @@
 name: ci
 
+# Tests for development branches and pull requests. Pushes to main are
+# tested by publish.yml (which calls this workflow) before releasing.
 on:
   push:
-    branches: [main]
+    branches-ignore: [main]
   pull_request:
-  workflow_call:   # reused by publish.yml
+  workflow_call:
 
 jobs:
   test:
@@ -16,6 +18,8 @@ jobs:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # setuptools-scm derives the version from tags
       - uses: astral-sh/setup-uv@v10.4.0  # no floating major tags for this action
       - name: Install
         run: |

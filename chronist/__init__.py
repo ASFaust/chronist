@@ -9,7 +9,14 @@
     runs = chronist.runs('model.arch = "lstm"', project="bptt-free")
     df = runs.history(["loss"], max_points=2000)
 """
-__version__ = "0.1.0"
+try:  # written by setuptools-scm at build/install time from the git tag
+    from ._version import __version__
+except ImportError:  # pragma: no cover - plain source checkout without an install
+    try:
+        from importlib.metadata import version as _v
+        __version__ = _v("chronist")
+    except Exception:
+        __version__ = "0.0.0+unknown"
 
 from .client import Run, active, finish, init, log, sync  # noqa: E402
 from .client.code import Code  # noqa: E402
