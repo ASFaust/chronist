@@ -19,6 +19,7 @@ import numpy as np
 
 from ..meta import MetadataStore
 from ..store import Buckets, MetricStore, Series, bucket_width, open_store
+from ..store.cache import CachingStore
 
 log = logging.getLogger("chronist.server")
 
@@ -138,7 +139,8 @@ class Core:
     def __init__(self, data_dir: str, metric_store: Optional[str] = None,
                  heartbeat_timeout: float = 180.0):
         self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
-        self.meta, self.store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
+        self.meta, store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
+        self.store = CachingStore(store)
         self.writer = Writer()
         self.events = Broadcaster()
         self.heartbeat_timeout = heartbeat_timeout

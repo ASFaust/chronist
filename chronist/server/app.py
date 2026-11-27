@@ -319,11 +319,12 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
         from ..readback import long_table
         table = long_table(core.meta, core.store, ids, keys or None, max_points=mp)
         if fmt == "csv":
+            import csv
             buf = io.StringIO()
             cols = list(table)
-            buf.write(",".join(cols) + "\n")
-            for row in zip(*[table[c] for c in cols]):
-                buf.write(",".join("" if v is None else str(v) for v in row) + "\n")
+            w = csv.writer(buf, lineterminator="\n")
+            w.writerow(cols)
+            w.writerows(zip(*[table[c] for c in cols]))
             return Response(buf.getvalue(), media_type="text/csv",
                             headers={"Content-Disposition": 'attachment; filename="chronist.csv"'})
         try:

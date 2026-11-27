@@ -5,11 +5,15 @@ import numpy as np
 import pytest
 
 from chronist.store import BACKENDS, Series, open_store
+from chronist.store.cache import CachingStore
 
 
-@pytest.fixture(params=sorted(BACKENDS))
+@pytest.fixture(params=sorted(BACKENDS) + [f"{b}+cache" for b in sorted(BACKENDS)])
 def store(request, tmp_path):
-    s = open_store(request.param, str(tmp_path / "metrics.db"))
+    kind, _, cached = request.param.partition("+")
+    s = open_store(kind, str(tmp_path / "metrics.db"))
+    if cached:
+        s = CachingStore(s)
     yield s
     s.close()
 
@@ -171,3 +175,18 @@ def test_explicit_range_shares_grid(store):
     assert len(widths) == 1
     b = store.read(1, "b", 0, 100_000, max_points=500)
     assert len(b) <= 500 and b.count.sum() == 70_000
+
+
+def test_cache_invalidation(tmp_path):
+    s = CachingStore(open_store("sqlite_rows", str(tmp_path / "m.db")))
+    s.write(1, pts("x", range(100)))
+    a = s.read(1, "x", max_points=10)
+    assert s.read(1, "x", max_points=10) is a and s.hits == 1
+    s.write(1, pts("x", range(100, 200)))
+    b = s.read(1, "x", max_points=10)
+    assert b.count.sum() == 200
+    s.write(2, pts("x", [1]))  # other run: run 1 stays cached
+    assert s.read(1, "x", max_points=10) is b
+    s.delete_run(1)
+    assert len(s.read(1, "x", max_points=10)) == 0
+    s.close()

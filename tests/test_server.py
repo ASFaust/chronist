@@ -145,17 +145,18 @@ def test_suggest_keys_projects(client):
 
 
 def test_export(client):
-    rid = mkrun(client, name="r1")["id"]
+    rid = mkrun(client, name="r1, quoted")["id"]
     log(client, rid, {"loss": (range(10), [float(i) for i in range(10)])})
     r = client.get("/api/export", params={"project": "p", "format": "csv", "keys": "loss"})
     lines = r.text.strip().splitlines()
     assert lines[0].startswith("run_id,run,key,step,value") and len(lines) == 11
+    assert lines[1].startswith('1,"r1, quoted",loss,0,0.0')
     r = client.get("/api/export", params={"project": "p"})
     import io
 
     import pyarrow.parquet as pq
     t = pq.read_table(io.BytesIO(r.content))
-    assert t.num_rows == 10 and t.column("run")[0].as_py() == "r1"
+    assert t.num_rows == 10 and t.column("run")[0].as_py() == "r1, quoted"
 
 
 def test_auth(core):
