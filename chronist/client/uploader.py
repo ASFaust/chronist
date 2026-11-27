@@ -122,7 +122,19 @@ class Uploader:
                     self._save()
                 return sent
             batch: Dict[str, Dict[str, list]] = {}
+            hists: list = []
             n = 0
+
+            def flush_batch():
+                nonlocal batch, hists, n, sent
+                if not batch and not hists:
+                    return
+                body = {"points": batch}
+                if hists:
+                    body["hists"] = hists
+                self._post(f"/api/runs/{rid}/log", body, packed=True)
+                sent += n
+                batch, hists, n = {}, [], 0
 
             def commit(i):
                 # progress = right after record i (records come from segment nseg)
@@ -142,22 +154,22 @@ class Uploader:
                         col["wall"].append(wall)
                         n += 1
                     if n >= MAX_POINTS_PER_REQUEST:
-                        self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
-                        sent += n
-                        batch, n = {}, 0
+                        flush_batch()
+                        commit(i)
+                elif kind == "h":
+                    _, _step, _wall, hrecs = rec
+                    for k, r in hrecs.items():
+                        hists.append({"key": k, **r})
+                        n += 1 + len(r.get("counts", b"")) // 64
+                    if n >= MAX_POINTS_PER_REQUEST:
+                        flush_batch()
                         commit(i)
                 elif kind == "w":
-                    if batch:
-                        self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
-                        sent += n
-                        batch, n = {}, 0
+                    flush_batch()
                     self._post(f"/api/runs/{rid}/rewind", {"step": int(rec[1])})
                     commit(i)
                 elif kind == "m":
-                    if batch:
-                        self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
-                        sent += n
-                        batch, n = {}, 0
+                    flush_batch()
                     r = self.http.patch(f"/api/runs/{rid}", json={"meta": rec[1]})
                     if r.status_code == 404:
                         raise ServerGone(r.text)
@@ -165,10 +177,7 @@ class Uploader:
                     commit(i)
                 elif kind in ("f", "r"):
                     # points before the status change go first
-                    if batch:
-                        self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
-                        sent += n
-                        batch, n = {}, 0
+                    flush_batch()
                     if kind == "f":
                         self._post(f"/api/runs/{rid}/finish", {"status": rec[1], "when": rec[2]})
                         self.prog["finish_sent"] = True
@@ -177,9 +186,7 @@ class Uploader:
                         self.prog["finish_sent"] = False
                     commit(i)
                 # unknown record kinds (from newer clients) are skipped
-            if batch:
-                self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
-                sent += n
+            flush_batch()
             commit(len(recs) - 1)
 
 

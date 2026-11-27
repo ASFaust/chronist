@@ -16,6 +16,9 @@ import time
 from typing import Any, Dict, Iterable, Optional
 
 from ..blobs import FsBlobStore
+from ..hist import DEFAULT_BINS, HistConfig, Histogram
+from ..hist import compute as compute_hist
+from ..hist import numel as hist_numel
 from .code import CodeError, code_opts_from_env_and_config, outside_imports, take_snapshot
 from .rundir import RunDir, RunWriter, default_dir, new_uid, write_json_atomic
 from .uploader import BackgroundUploader
@@ -92,35 +95,53 @@ def _config_to_dict(config: Any) -> dict:
         raise TypeError(f"cannot use {type(config).__name__} as config; pass a dict")
 
 
-def _scalar(v: Any) -> Optional[float]:
+def _scalar(v: Any) -> float:
     if isinstance(v, (int, float)):
-        return float(v)
-    if hasattr(v, "item"):  # numpy / torch / jax scalars
-        try:
-            v = v.item()
-        except (ValueError, RuntimeError):
-            raise TypeError("only scalars can be logged (histograms are not supported yet)")
         return float(v)
     if v is None:
         return math.nan
+    if hasattr(v, "item"):  # numpy / torch / jax scalars and 1-element arrays
+        return float(v.item())
     return float(v)
 
 
-def _flatten_metrics(d: dict, prefix: str = "", out: Optional[dict] = None) -> dict:
-    out = {} if out is None else out
+def _split_values(d: dict, auto_hist: bool, prefix: str = "", scalars=None, hists=None):
+    """Flatten nested dicts with '/' and sort values into scalars and histograms."""
+    scalars = {} if scalars is None else scalars
+    hists = {} if hists is None else hists
     for k, v in d.items():
         key = f"{prefix}{k}"
         if isinstance(v, dict):
-            _flatten_metrics(v, key + "/", out)
+            _split_values(v, auto_hist, key + "/", scalars, hists)
+        elif isinstance(v, Histogram):
+            hists[key] = v
         else:
-            out[key] = _scalar(v)
-    return out
+            n = hist_numel(v)
+            if n is None or n == 1:
+                scalars[key] = _scalar(v) if n is None else _scalar(_first(v))
+            elif not auto_hist:
+                raise TypeError(f"{key!r}: got {n} values; log a scalar or pass chronist.Histogram(...) "
+                                f"(auto_histograms is off)")
+            elif n == 0:
+                continue  # empty vector: nothing to record
+            else:
+                hists[key] = Histogram(v)  # default settings for this key
+    return scalars, hists
+
+
+def _first(v):
+    if isinstance(v, (list, tuple)):
+        return v[0] if not isinstance(v[0], (list, tuple)) else _first(v[0])
+    return v.reshape(-1)[0] if hasattr(v, "reshape") else v
 
 
 # ---------------------------------------------------------------- Run
 class Run:
     def __init__(self, rundir: RunDir, info: dict, url: Optional[str], token: Optional[str],
-                 resume: bool, start_step: int, rewind: Optional[int] = None):
+                 resume: bool, start_step: int, rewind: Optional[int] = None,
+                 histogram_bins: int = DEFAULT_BINS, auto_histograms: bool = True):
+        self._hist_cfg = HistConfig(histogram_bins)
+        self._auto_hist = auto_histograms
         self.dir = rundir
         self._info = info
         self.uid: str = info["uid"]
@@ -172,7 +193,10 @@ class Run:
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None, *,
             every: Optional[int] = None, interval: Optional[float] = None) -> None:
-        """Log scalars. Never blocks on the network.
+        """Log scalars and histograms. Never blocks on the network.
+
+        Values with more than one element (lists, numpy arrays, torch/jax
+        tensors) become histograms, as does chronist.Histogram(x, ...).
 
         step: explicit step (int). Default: one past the previous step.
         every: only log when ``step % every == 0``.
@@ -196,7 +220,7 @@ class Run:
                         self._step += 1
                     return
                 self._last_time[sig] = now
-            values = _flatten_metrics(data)
+            values, hists = _split_values(data, self._auto_hist)
             if self._floor is not None and s < self._floor and not self._warned_floor:
                 self._warned_floor = True
                 _logger.warning(
@@ -206,7 +230,20 @@ class Run:
                     s, self._floor - 1, self.uid, s)
             if values:
                 self._writer.append(["l", s, now, values])
+            if hists:
+                recs = {}
+                for key, h in hists.items():
+                    o = self._hist_cfg.resolve(key, h)
+                    recs[key] = compute_hist(h.values, s, bins=o["bins"], range=o["range"], raw=o["raw"],
+                                             wall_time=now).to_wire()
+                self._writer.append(["h", s, now, recs])
             self._step = max(self._step, s + 1)
+
+    def configure_histograms(self, pattern: str, bins: Optional[int] = None,
+                             range: Optional[tuple] = None, raw: Optional[bool] = None) -> None:
+        """Defaults for histogram keys matching a glob (``"grad/*"``). Precedence:
+        chronist.Histogram(...) arguments > the last matching pattern > init(histogram_bins=) > 64."""
+        self._hist_cfg.configure(pattern, bins=bins, range=range, raw=raw)
 
     def finish(self, status: str = "finished", timeout: Optional[float] = None) -> None:
         """Mark the run done and upload what's left (waits at most `timeout`
@@ -271,7 +308,8 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
          tags: Iterable[str] = (), notes: str = "", *, resume: Optional[str] = None,
          url: Optional[str] = None, token: Optional[str] = None, dir: Optional[str] = None,
          offline: bool = False, capture: bool = True, code: Any = "auto",
-         rewind: Optional[int] = None) -> Run:
+         rewind: Optional[int] = None, histogram_bins: int = DEFAULT_BINS,
+         auto_histograms: bool = True) -> Run:
     """Start (or resume) a run.
 
     code: code snapshot. "auto" (default) | "git" | a path | None/False (off)
@@ -279,6 +317,8 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
         script's directory. See docs/CODE_SNAPSHOTS.md.
     project: defaults to $CHRONIST_PROJECT or "default".
     resume: uid of a run to re-attach to and continue logging.
+    histogram_bins: default bins for histograms (64); auto_histograms=False
+        makes non-scalar values raise TypeError instead of becoming histograms.
     rewind: with resume, discard everything the run logged at step >= rewind
         (e.g. resuming from an earlier checkpoint); logging continues there.
     url/token: server; default $CHRONIST_URL / $CHRONIST_TOKEN. No URL (or
@@ -333,7 +373,8 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
             start = _remote_next_step(url, token, resume) if url else 0
             if rewind is not None:
                 start = min(start, rewind)
-        run = Run(rd, info, url, token, resume=True, start_step=start, rewind=rewind)
+        run = Run(rd, info, url, token, resume=True, start_step=start, rewind=rewind,
+                  histogram_bins=histogram_bins, auto_histograms=auto_histograms)
     else:
         snap = snapshot()
         uid = new_uid()
@@ -345,7 +386,8 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
         if snap:
             info["meta"]["code"] = snap
         write_json_atomic(rd.info_path, info)
-        run = Run(rd, info, url, token, resume=False, start_step=0)
+        run = Run(rd, info, url, token, resume=False, start_step=0,
+                  histogram_bins=histogram_bins, auto_histograms=auto_histograms)
     _active = run
     return run
 

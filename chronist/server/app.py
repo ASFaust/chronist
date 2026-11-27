@@ -23,7 +23,7 @@ from ..blobs import valid_hash
 from ..query import QueryError
 from .tokens import TokenStore, from_dict as token_store_from_dict
 from ..store import Buckets
-from .core import Core, decode_points
+from .core import Core, decode_hists, decode_points
 
 log = logging.getLogger("chronist.server")
 
@@ -33,7 +33,7 @@ RAW_PAGE = 250_000  # max raw points per response (bounds response-building memo
 EXPORT_PAGE = 100_000  # points per export page (= parquet row group)
 
 # Endpoints that are reads even though they are POST.
-READ_POSTS = {"/api/series"}
+READ_POSTS = {"/api/series", "/api/hist/render"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -203,9 +203,10 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
         body = await read_body(request)
         try:
             pts = decode_points(body)
-        except (TypeError, AttributeError) as e:
-            raise ApiError(400, f"bad points payload: {e}")
-        return respond(request, await submit(core.op_log, rid, pts))
+            hs = decode_hists(body)
+        except (TypeError, AttributeError, KeyError) as e:
+            raise ApiError(400, f"bad log payload: {e}")
+        return respond(request, await submit(core.op_log, rid, pts, hs))
 
     async def rewind(request):
         body = await read_body(request)
@@ -275,7 +276,8 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
     def keys(request):
         project = request.query_params.get("project") or None
         return respond(request, {"config": core.meta.config_keys(project),
-                                 "metrics": core.meta.metric_keys(project)})
+                                 "metrics": core.meta.metric_keys(project),
+                                 "hists": core.meta.hist_keys(project)})
 
     @threaded
     def suggest(request):
@@ -305,6 +307,38 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
         if len(b) == limit:
             out["next_start"] = int(b.step[-1]) + 1
         return respond(request, out)
+
+    @threaded
+    def hist_records(request):
+        """Histogram records of one run/key: ?start&end&max_steps, or ?at=step
+        for the record at (or before) a step."""
+        rid = run_id_param(request)
+        key = request.path_params["key"]
+        at = qint(request, "at")
+        if at is not None:
+            r = core.hists.at(rid, key, at)
+            return respond(request, {"records": [] if r is None else [r.to_json()]})
+        ms = qint(request, "max_steps")
+        recs = core.hists.read(rid, key, qint(request, "start"), qint(request, "end"),
+                               None if ms is None else max(1, min(ms, 100_000)))
+        return respond(request, {"records": [r.to_json() for r in recs]})
+
+    async def hist_render(request):
+        body = await read_body(request)
+        run_ids = body.get("runs")
+        key = body.get("key")
+        if not isinstance(run_ids, list) or not isinstance(key, str):
+            raise ApiError(400, "give runs: [ids] and key")
+        yr = body.get("y_range")
+        if yr is not None and (not isinstance(yr, list) or len(yr) != 2 or not yr[0] < yr[1]):
+            raise ApiError(400, "y_range must be [lo, hi] with lo < hi")
+
+        def work():
+            return core.render_hist([int(r) for r in run_ids[:50]], key, body.get("start"), body.get("end"),
+                                    body.get("max_steps", 300), body.get("rows", 128),
+                                    None if yr is None else (float(yr[0]), float(yr[1])),
+                                    body.get("mode", "heatmap"), body.get("step"))
+        return respond(request, await asyncio.get_running_loop().run_in_executor(None, work))
 
     async def series(request):
         body = await read_body(request)
@@ -566,6 +600,8 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
         Route("/api/keys", handle(keys)),
         Route("/api/suggest", handle(suggest)),
         Route("/api/series", handle(series), methods=["POST"]),
+        Route("/api/hist/render", handle(hist_render), methods=["POST"]),
+        Route("/api/runs/{run_id}/hist/{key:path}", handle(hist_records), methods=["GET"]),
         Route("/api/stream", stream),
         Route("/api/export", handle(export)),
         Route("/", index),

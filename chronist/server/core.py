@@ -82,6 +82,14 @@ def _dir_size(path: str) -> int:
     return total
 
 
+def open_hist_store(data_dir: str, readonly: bool = False):
+    from ..store.hist_store import SqliteHistStore
+    path = os.path.join(os.path.abspath(os.path.expanduser(data_dir)), "hists.sqlite")
+    if readonly and not os.path.exists(path):
+        return None
+    return SqliteHistStore(path, readonly=readonly)
+
+
 # ---------------------------------------------------------------- writer
 class Writer:
     """The only thread that writes to storage. Everything else submits ops."""
@@ -143,6 +151,25 @@ class Broadcaster:
 
 
 # ---------------------------------------------------------------- payload decoding
+def decode_hists(payload: dict) -> Dict[str, list]:
+    """{"hists": [{"key": k, <HistRecord wire fields>}, ...]} -> {key: [HistRecord]}"""
+    from ..hist import HistRecord
+    out: Dict[str, list] = {}
+    for d in payload.get("hists") or []:
+        if not isinstance(d, dict) or not isinstance(d.get("key"), str) or not d["key"]:
+            raise ValueError("each histogram needs a non-empty key")
+        counts = d.get("counts")
+        if isinstance(counts, list):  # JSON clients may send plain lists
+            import numpy as _np
+            d = {**d, "counts": _np.asarray(counts, dtype="<u8").tobytes(), "c64": True}
+        if not isinstance(d["counts"], (bytes, bytearray)):
+            raise ValueError("histogram counts must be bytes (uint32/uint64 LE) or a list")
+        if len(d["counts"]) > 8 * 1024 + 8:
+            raise ValueError("too many histogram bins (max 1024)")
+        out.setdefault(d["key"], []).append(HistRecord.from_wire(d))
+    return out
+
+
 def decode_points(payload: dict) -> Dict[str, Series]:
     """{"points": {key: {"step": [...], "value": [...], "wall": [...]?}}}"""
     pts = payload.get("points") or {}
@@ -174,6 +201,7 @@ class Core:
         self.meta, store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
         self.store = CachingStore(store, max_mb=cache_mb)
         self.blobs = FsBlobStore(os.path.join(self.data_dir, "blobs"))
+        self.hists = open_hist_store(self.data_dir)
         self.writer = Writer()
         self.events = Broadcaster()
         self.heartbeat_timeout = heartbeat_timeout
@@ -185,6 +213,7 @@ class Core:
         self.writer.stop()
         self.pool.shutdown(wait=False)
         self.store.close()
+        self.hists.close()
         self.meta.close()
         if self._lock is not None:
             self._lock.close()
@@ -212,9 +241,14 @@ class Core:
                              "new": new})
         return {"id": run_id, "uid": uid, "name": run["name"], "project": project, "created_new": new}
 
-    def op_log(self, run_id: int, points: Dict[str, Series]) -> dict:
+    def op_log(self, run_id: int, points: Dict[str, Series], hists: Optional[Dict[str, list]] = None) -> dict:
         project = self._check_run(run_id)
         self.store.write(run_id, points)
+        if hists:
+            self.hists.write(run_id, hists)
+            hlast = {k: max(r.step for r in rs) for k, rs in hists.items() if rs}
+            self.meta.update_hist_keys(run_id, hlast)
+            self.events.publish({"type": "hist", "project": project, "run_id": run_id, "last": hlast})
         last = {}
         n = 0
         for k, s in points.items():
@@ -237,8 +271,15 @@ class Core:
         project = self._check_run(run_id)
         step = int(step)
         self.store.delete_range(run_id, step)
+        self.hists.delete_range(run_id, step)
         keys = self.store.keys(run_id)
         self.meta.replace_summary(run_id, self.store.last(run_id, keys))
+        hk = {}
+        for k in self.hists.keys(run_id):
+            r = self.hists.last(run_id, k)
+            if r is not None:
+                hk[k] = r.step
+        self.meta.update_hist_keys(run_id, hk, replace=True)
         self.events.publish({"type": "rewind", "project": project, "run_id": run_id, "step": step})
         return {"ok": True, "step": step}
 
@@ -265,6 +306,7 @@ class Core:
     def op_delete(self, run_id: int) -> dict:
         project = self._check_run(run_id)
         self.store.delete_run(run_id)
+        self.hists.delete_run(run_id)
         self.meta.delete_run(run_id)
         self.events.publish({"type": "deleted", "project": project, "run_id": run_id})
         return {"ok": True}
@@ -329,9 +371,14 @@ class Core:
         self.meta.vacuum(full=vacuum)
         if hasattr(self.store, "vacuum"):
             self.store.vacuum(full=vacuum)
+        self.hists.vacuum(full=vacuum)
         after = _dir_size(self.data_dir)
         return {"blobs_removed": removed, "blob_bytes_freed": freed,
                 "db_bytes_freed": max(0, before - after), "vacuum": "full" if vacuum else "incremental"}
+
+    def render_hist(self, run_ids: List[int], key: str, start=None, end=None, max_steps: int = 300,
+                    rows: int = 128, y_range=None, mode: str = "heatmap", step=None) -> dict:
+        return render_hist(self.hists, run_ids, key, start, end, max_steps, rows, y_range, mode, step)
 
     def op_mark_crashed(self) -> List[int]:
         ids = self.meta.mark_crashed(self.heartbeat_timeout)
@@ -511,3 +558,66 @@ def _jsonable(v):
     if isinstance(v, (str, int, float, bool)) or v is None:
         return v
     return str(v)
+
+
+# ---------------------------------------------------------------- histogram rendering
+QUANTILES = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+def _stats(recs) -> dict:
+    from ..hist import _f
+    cols = ("count", "nan_count", "posinf_count", "neginf_count", "min", "max", "mean", "std",
+            "underflow", "overflow")
+    return {c: [(_f(getattr(r, c)) if isinstance(getattr(r, c), float) else getattr(r, c)) for r in recs]
+            for c in cols}
+
+
+def render_hist(hists, run_ids: List[int], key: str, start=None, end=None, max_steps: int = 300,
+                rows: int = 128, y_range=None, mode: str = "heatmap", step=None) -> dict:
+    """Server-side histogram views for one key over several runs.
+
+    heatmap:   per run a steps x rows density matrix on one shared value grid
+    quantiles: per run 5/25/50/75/95% quantiles per step
+    step:      per run the record at (or before) ``step``, re-binned on a shared grid
+    All modes include exact per-step stats (mean/std/min/max/count/NaN/Inf).
+    """
+    from .. import hist as H
+    max_steps = max(1, min(int(max_steps or 300), 5000))
+    rows = max(1, min(int(rows or 128), 1024))
+    out: Dict[str, Any] = {"key": key, "mode": mode, "runs": []}
+    if mode == "step":
+        recs = {}
+        for rid in run_ids:
+            r = hists.at(rid, key, int(step)) if step is not None else hists.last(rid, key)
+            if r is not None:
+                recs[rid] = r
+        lo, hi = y_range or H.common_range(list(recs.values()))
+        edges = np.linspace(lo, hi, rows + 1)
+        out["edges"] = edges.tolist()
+        for rid, r in recs.items():
+            out["runs"].append({"run_id": rid, "step": r.step, "density": H.rebin(r, edges).tolist(),
+                                **{k: v[0] for k, v in _stats([r]).items()}})
+        return out
+    per_run = {rid: hists.read(rid, key, start, end, max_steps) for rid in run_ids}
+    allrecs = [r for rs in per_run.values() for r in rs]
+    if mode == "heatmap":
+        lo, hi = y_range or H.common_range(allrecs)
+        out["y_range"] = [lo, hi]
+        out["rows"] = rows
+        vmax = 0.0
+        for rid, rs in per_run.items():
+            m, _ = H.to_dense(rs, rows=rows, y_range=(lo, hi))
+            vmax = max(vmax, float(m.max()) if m.size else 0.0)
+            out["runs"].append({"run_id": rid, "steps": [r.step for r in rs],
+                                "matrix": np.round(m, 3).ravel().tolist(), **_stats(rs)})
+        out["vmax"] = vmax
+    elif mode == "quantiles":
+        out["quantiles"] = list(QUANTILES)
+        for rid, rs in per_run.items():
+            qs = np.array([H.quantiles(r, QUANTILES) for r in rs]).reshape(len(rs), len(QUANTILES))
+            q = {f"q{int(p * 100):02d}": [None if not np.isfinite(v) else float(v) for v in qs[:, i]]
+                 for i, p in enumerate(QUANTILES)}
+            out["runs"].append({"run_id": rid, "steps": [r.step for r in rs], **q, **_stats(rs)})
+    else:
+        raise ValueError(f"unknown histogram render mode {mode!r}")
+    return out

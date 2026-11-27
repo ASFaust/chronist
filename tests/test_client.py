@@ -338,3 +338,70 @@ def test_prune_lifecycle(server, tmp_path, monkeypatch):
     assert prune([str(root)], dry_run=True, verbose=False)["pruned"] == 1
     assert os.path.exists(r5.dir.path)
     assert prune([str(root)], verbose=False)["pruned"] == 1 and not os.path.exists(r5.dir.path)
+
+
+def test_histograms_end_to_end(server):
+    import httpx
+
+    import chronist.hist as H
+    torch = pytest.importorskip("torch")
+    run = chronist.init(project="p", url=server.url, code=None, histogram_bins=16)
+    run.configure_histograms("grad/*", bins=8)
+    rng = np.random.default_rng(0)
+    for s in range(0, 100, 10):
+        run.log({"loss": 1.0 / (s + 1),                         # scalar
+                 "one": np.array([3.0]),                          # 1 element -> scalar
+                 "w": rng.normal(loc=s / 10, size=1000),          # auto histogram (16 bins)
+                 "grad": {"l1": torch.randn(500)},                # nested -> grad/l1, pattern: 8 bins
+                 "ret": chronist.Histogram([1.0, 2.0, 5.0], raw=True),
+                 "fixed": chronist.Histogram(rng.normal(size=100), bins=4, range=(-1, 1))}, step=s)
+    run.finish()
+    r = chronist.run(run.id, url=server.url)
+    assert set(r.summary) == {"loss", "one"}
+    w = r.histograms("w")
+    assert [x.step for x in w] == list(range(0, 100, 10)) and w[0].bins == 16
+    assert r.histograms("grad/l1")[0].bins == 8
+    assert r.histogram("ret", step=55).step == 50 and r.histogram("ret").raw.tolist() == [1.0, 2.0, 5.0]
+    f = r.histogram("fixed")
+    assert f.fixed and f.underflow + f.overflow + f.counts.sum() == 100
+    m, edges, steps = r.histograms("w", max_steps=4).to_dense(rows=32)
+    assert m.shape == (len(steps), 32) and steps[0] == 0 and steps[-1] == 90
+    np.testing.assert_allclose(m.sum(axis=1), 1000, rtol=1e-5)
+    df = chronist.runs("", project="p", url=server.url).histograms("w")
+    assert len(df) == 10 and df["counts"].iloc[0].sum() == 1000 and len(df["edges"].iloc[0]) == 17
+    local = chronist.runs("", project="p", data_dir=server.data_dir).histograms("w", max_steps=3)
+    assert len(local) == 3 and local.step.iloc[0] == 0 and local.step.iloc[-1] == 90
+    # keys listing + render endpoint
+    keys = httpx.get(f"{server.url}/api/keys", params={"project": "p"}).json()
+    assert set(keys["hists"]) == {"w", "grad/l1", "ret", "fixed"} and "w" not in keys["metrics"]
+    for mode in ("heatmap", "quantiles"):
+        out = httpx.post(f"{server.url}/api/hist/render",
+                         json={"runs": [run.id], "key": "w", "mode": mode, "max_steps": 5, "rows": 20}).json()
+        assert len(out["runs"][0]["steps"]) <= 5
+        if mode == "heatmap":
+            mat = np.array(out["runs"][0]["matrix"]).reshape(-1, 20)
+            np.testing.assert_allclose(mat.sum(axis=1), 1000, rtol=1e-3)
+        else:
+            assert out["runs"][0]["q50"][0] == pytest.approx(0.0, abs=0.2)
+    out = httpx.post(f"{server.url}/api/hist/render",
+                     json={"runs": [run.id], "key": "w", "mode": "step", "step": 42, "rows": 10}).json()
+    assert out["runs"][0]["step"] == 40 and sum(out["runs"][0]["density"]) == pytest.approx(1000)
+    # rewind drops histogram records too
+    r2 = chronist.init(project="p", url=server.url, resume=run.uid, rewind=50, code=None)
+    r2.finish()
+    assert [x.step for x in chronist.run(run.id, url=server.url).histograms("w")] == [0, 10, 20, 30, 40]
+
+
+def test_histograms_offline_sync_and_strict(server):
+    run = chronist.init(project="p", offline=True, code=None)
+    for s in range(5):
+        run.log({"h": np.arange(10.0) * s}, step=s)
+    run.finish()
+    chronist.sync(url=server.url, verbose=False)
+    recs = chronist.run(run.uid, url=server.url).histograms("h")
+    assert [x.step for x in recs] == list(range(5)) and recs[0].lo == recs[0].hi == 0.0
+    strict = chronist.init(project="p", offline=True, code=None, auto_histograms=False)
+    with pytest.raises(TypeError):
+        strict.log({"v": [1.0, 2.0]})
+    strict.log({"v": chronist.Histogram([1.0, 2.0])})  # explicit still fine
+    strict.finish()

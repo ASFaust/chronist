@@ -126,6 +126,8 @@ class _LocalSource:
     def __init__(self, data_dir: str):
         from .server.core import open_data_dir
         self.meta, self.store, _ = open_data_dir(data_dir, readonly=True)
+        self._data_dir = data_dir
+        self._hists = False  # opened lazily
         from .blobs import FsBlobStore
         self.blobs = FsBlobStore(os.path.join(os.path.abspath(os.path.expanduser(data_dir)), "blobs"))
 
@@ -149,6 +151,17 @@ class _LocalSource:
         if r is not None:
             r["keys"] = self.store.keys(rid)
         return r
+
+    def hist_records(self, run_id, key, start=None, end=None, max_steps=None, at=None):
+        from .server.core import open_hist_store
+        if self._hists is False:
+            self._hists = open_hist_store(self._data_dir, readonly=True)
+        if self._hists is None:
+            return []
+        if at is not None:
+            r = self._hists.at(run_id, key, at)
+            return [] if r is None else [r]
+        return self._hists.read(run_id, key, start, end, max_steps)
 
     def manifest(self, run_id: int) -> Optional[dict]:
         import json
@@ -224,6 +237,12 @@ class _RemoteSource:
             if "404" in str(e):
                 return None
             raise
+
+    def hist_records(self, run_id, key, start=None, end=None, max_steps=None, at=None):
+        from .hist import HistRecord
+        d = self._get(f"/api/runs/{run_id}/hist/{quote(key, safe='/')}", start=start, end=end,
+                      max_steps=max_steps, at=at)
+        return [HistRecord.from_json(r) for r in d["records"]]
 
     def manifest(self, run_id: int) -> Optional[dict]:
         r = self.http.get(f"/api/runs/{run_id}/code")
@@ -333,6 +352,33 @@ class RunSet:
         if isinstance(keys, str):
             keys = [keys]
         cols = self._src.history(self.ids, list(keys) if keys is not None else None, max_points, start, end)
+        return _frame(cols, self._df)
+
+    def histogram_records(self, key: str, max_steps: Optional[int] = None, start: Optional[int] = None,
+                          end: Optional[int] = None) -> Dict[int, Any]:
+        """{run_id: HistList} for one histogram key (``.to_dense(rows)`` on each list)."""
+        from .hist import HistList
+        return {r["id"]: HistList(self._src.hist_records(r["id"], key, start, end, max_steps)) for r in self.runs}
+
+    def histograms(self, key: str, max_steps: Optional[int] = None, start: Optional[int] = None,
+                   end: Optional[int] = None):
+        """Long table, one row per (run, step): stats + ``edges`` and ``counts`` arrays."""
+        cols: Dict[str, list] = {c: [] for c in (
+            "run_id", "run", "step", "wall_time", "count", "nan_count", "posinf_count", "neginf_count",
+            "min", "max", "mean", "std", "lo", "hi", "underflow", "overflow", "edges", "counts")}
+        names = {r["id"]: r["name"] for r in self.runs}
+        for rid, recs in self.histogram_records(key, max_steps, start, end).items():
+            for rec in recs:
+                cols["run_id"].append(rid)
+                cols["run"].append(names[rid])
+                for c in list(cols)[2:]:
+                    if c not in ("edges", "counts"):
+                        cols[c].append(getattr(rec, c))
+                cols["edges"].append(rec.edges)
+                cols["counts"].append(rec.counts)
+        if self._df == "polars":  # polars wants lists for nested columns
+            cols["edges"] = [e.tolist() for e in cols["edges"]]
+            cols["counts"] = [c.tolist() for c in cols["counts"]]
         return _frame(cols, self._df)
 
     def keys(self) -> List[str]:
@@ -452,6 +498,17 @@ class RunRef:
 
     def history(self, keys=None, max_points=None, start=None, end=None):
         return RunSet(self._src, [self.data], self._df).history(keys, max_points, start, end)
+
+    def histograms(self, key: str, max_steps: Optional[int] = None, start: Optional[int] = None,
+                   end: Optional[int] = None):
+        """HistList of records (``.to_dense(rows)``)."""
+        from .hist import HistList
+        return HistList(self._src.hist_records(self.id, key, start, end, max_steps))
+
+    def histogram(self, key: str, step: Optional[int] = None):
+        """The record at ``step`` (or the nearest one before it); the last one if step is None."""
+        recs = self._src.hist_records(self.id, key, at=2 ** 62 if step is None else int(step))
+        return recs[0] if recs else None
 
 
 def run(ref, *, url: Optional[str] = None, token: Optional[str] = None, data_dir: Optional[str] = None,

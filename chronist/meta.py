@@ -64,6 +64,12 @@ CREATE TABLE IF NOT EXISTS summary (
     PRIMARY KEY (run_id, key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS summary_key ON summary(key, value);
+CREATE TABLE IF NOT EXISTS hist_keys (
+    run_id    INTEGER NOT NULL,
+    key       TEXT NOT NULL,
+    last_step INTEGER NOT NULL,
+    PRIMARY KEY (run_id, key)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS run_code (
     run_id   INTEGER PRIMARY KEY,
     manifest TEXT NOT NULL
@@ -284,6 +290,28 @@ class MetadataStore:
             steps = max((int(st) for st, _ in last.values()), default=None)
             con.execute("UPDATE runs SET steps=?, updated=? WHERE id=?", (steps, time.time(), run_id))
 
+    def update_hist_keys(self, run_id: int, last: Dict[str, int], replace: bool = False) -> None:
+        with self.transaction() as con:
+            if replace:
+                con.execute("DELETE FROM hist_keys WHERE run_id=?", (run_id,))
+            con.executemany("""INSERT INTO hist_keys(run_id, key, last_step) VALUES (?,?,?)
+                               ON CONFLICT(run_id, key) DO UPDATE SET last_step=max(last_step, excluded.last_step)""",
+                            [(run_id, k, int(st)) for k, st in last.items()])
+            if not replace and last:
+                mx = max(int(v) for v in last.values())
+                now = time.time()
+                con.execute("UPDATE runs SET steps = max(coalesce(steps, -1), ?), updated=?, heartbeat=?, "
+                            "status = CASE WHEN status='crashed' THEN 'running' ELSE status END WHERE id=?",
+                            (mx, now, now, run_id))
+
+    def hist_keys(self, project: Optional[str]) -> List[str]:
+        sql = "SELECT DISTINCT h.key FROM hist_keys h"
+        params: list = []
+        if project is not None:
+            sql += " JOIN runs r ON r.id=h.run_id JOIN projects p ON p.id=r.project_id WHERE p.name=?"
+            params.append(project)
+        return [r[0] for r in self._r().execute(sql + " ORDER BY h.key", params)]
+
     def heartbeat(self, run_id: int) -> None:
         now = time.time()
         with self.transaction() as con:
@@ -329,7 +357,7 @@ class MetadataStore:
 
     def delete_run(self, run_id: int) -> None:
         with self.transaction() as con:
-            for t in ("config", "tags", "summary", "run_code"):
+            for t in ("config", "tags", "summary", "run_code", "hist_keys"):
                 con.execute(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
             con.execute("DELETE FROM runs WHERE id=?", (run_id,))
 

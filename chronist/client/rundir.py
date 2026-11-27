@@ -10,6 +10,7 @@ Layout of ``$CHRONIST_DIR/runs/<uid>/``::
 Records::
 
     ["l", step, wall_time, {key: value, ...}]   logged scalars
+    ["h", step, wall_time, {key: record}]       histogram records (chronist.hist wire format)
     ["f", status, when]                         finish
     ["r", when]                                 resumed (new process attached)
     ["m", {meta}]                               metadata update (merged into run meta)

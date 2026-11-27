@@ -113,6 +113,21 @@ class HistRecord:
                    raw=None if raw is None else np.frombuffer(raw, dtype="<f4").copy(),
                    wall_time=d.get("wall"))
 
+    @classmethod
+    def from_json(cls, d: dict) -> "HistRecord":
+        n = lambda v: math.nan if v is None else float(v)  # noqa: E731
+        return cls(step=int(d["step"]), count=int(d["count"]), nan_count=int(d["nan_count"]),
+                   posinf_count=int(d["posinf_count"]), neginf_count=int(d["neginf_count"]),
+                   min=n(d["min"]), max=n(d["max"]), mean=n(d["mean"]), std=n(d["std"]),
+                   lo=n(d["lo"]), hi=n(d["hi"]), counts=np.asarray(d["counts"], dtype=np.int64),
+                   underflow=int(d.get("underflow", 0)), overflow=int(d.get("overflow", 0)),
+                   fixed=bool(d.get("fixed")),
+                   raw=None if d.get("raw") is None else np.asarray(d["raw"], dtype=np.float32),
+                   wall_time=d.get("wall_time"))
+
+    def quantiles(self, qs=(0.05, 0.25, 0.5, 0.75, 0.95)) -> List[float]:
+        return quantiles(self, qs)
+
     def to_json(self) -> dict:
         """JSON-friendly dict (API responses)."""
         d = {"step": self.step, "count": self.count, "nan_count": self.nan_count,
@@ -355,3 +370,12 @@ def subsample_indices(n: int, max_steps: Optional[int]) -> np.ndarray:
     if max_steps <= 1:
         return np.array([n - 1])
     return np.unique(np.round(np.linspace(0, n - 1, max_steps)).astype(np.int64))
+
+
+class HistList(list):
+    """List of HistRecords (one run, one key) with ``to_dense``."""
+
+    def to_dense(self, rows: int = 128, y_range: Optional[Tuple[float, float]] = None):
+        """(steps x rows matrix, edges, steps): same re-binning as the server."""
+        m, edges = to_dense(self, rows, y_range)
+        return m, edges, np.array([r.step for r in self], dtype=np.int64)

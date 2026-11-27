@@ -25,3 +25,14 @@ Notes
 - Peak RSS in the 10M rows is mostly the benchmark's own producer threads holding the generated
   curves, not the store.
 - `chunked` is the default backend for new data dirs.
+
+## HistStore
+
+`python bench/bench_hist.py --steps 10000` (10 keys x 10k steps, 64 bins, 4096 values per record):
+
+| backend | records | B/record | write rec/s | compute rec/s | read 300 steps ms | heatmap 300x128 ms |
+|---|---|---|---|---|---|---|
+| sqlite_hist | 100,000 | 275 | 69,170 | 5,428 | 5.1 | 5.1 |
+
+"compute" is client-side numpy binning of 4096 values; log histograms every N
+steps (`run.log(..., every=N)`): 10 keys x 10k logged steps is ~28 MB per run.

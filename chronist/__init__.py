@@ -13,7 +13,8 @@ __version__ = "0.1.0"
 
 from .client import Run, active, finish, init, log, sync  # noqa: E402
 from .client.code import Code  # noqa: E402
+from .hist import Histogram  # noqa: E402
 from .readback import RunRef, RunSet, code_diff, run, runs  # noqa: E402
 
-__all__ = ["init", "log", "finish", "active", "Run", "runs", "RunSet", "run", "RunRef", "Code",
+__all__ = ["init", "log", "finish", "active", "Run", "runs", "RunSet", "run", "RunRef", "Code", "Histogram",
            "code_diff", "sync", "__version__"]
