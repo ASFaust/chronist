@@ -49,8 +49,9 @@ export function RunTable({ runs, selected, slots, cols, sort, onSort, onToggle, 
 
   const columns = useMemo(() => [
     ...BASE_COLS,
-    ...cols.map((k) => ({ key: k, label: k, width: 110, num: true, extra: true })),
-  ], [cols]);
+    ...cols.map((k) => ({ key: k, label: k, width: 110, extra: true,
+                          num: k.startsWith("last(") || runs.slice(0, 50).some((r) => typeof runFieldValue(r, k) === "number") })),
+  ], [cols, runs]);
   const template = "34px " + columns.map((c) => c.width + "px").join(" ") + " 1fr";
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - 10);

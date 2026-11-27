@@ -200,7 +200,14 @@ run.finish()</pre>
         </select>
         <${QueryInput} project=${project} value=${q} error=${qErr} onChange=${setQ} />
         <div class="top-right">
-          <span class="count">${total} runs${selected.size ? html` · <b>${selected.size}</b> selected` : ""}</span>
+          <span class="count">${total} runs</span>
+          ${selected.size > 0 && html`
+            <span class="bulk">
+              <b>${selected.size}</b> selected
+              <button class="btn small ghost" onClick=${() => setSelected(new Set())} title="Clear selection">Clear</button>
+              <button class="btn small ghost" onClick=${bulkTag}>Tag…</button>
+              <button class="btn small ghost danger" onClick=${bulkDelete}>Delete…</button>
+            </span>`}
           <a class="btn small ghost" href=${api.exportUrl(project, q, [], "parquet")} title="Download matching runs as Parquet">Export</a>
           <select class="theme" value=${theme} onChange=${(e) => setThemeChoice(e.target.value)} title="Theme">
             <option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option>
@@ -208,13 +215,6 @@ run.finish()</pre>
         </div>
       </header>
       <section class="runs-pane">
-        ${selected.size > 0 && html`
-          <div class="bulk">
-            <span>${selected.size} selected</span>
-            <button class="btn small ghost" onClick=${() => setSelected(new Set())}>Clear</button>
-            <button class="btn small ghost" onClick=${bulkTag}>Tag…</button>
-            <button class="btn small ghost danger" onClick=${bulkDelete}>Delete…</button>
-          </div>`}
         <${RunTable} runs=${sortedRuns} selected=${selected} slots=${slots} cols=${cols} sort=${sort}
           onSort=${onSort} onToggle=${onToggle} onSelectAll=${onSelectAll} onOpen=${setDrawer}
           keys=${keys} onCols=${setCols} />
