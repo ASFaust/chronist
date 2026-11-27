@@ -222,7 +222,7 @@ run.finish()</pre>
   return html`
     <div class="app" style=${{ "--split": split + "vh" }}>
       <header class="top">
-        <div class="brand"><span class="logo" aria-hidden="true">◷</span>chronist</div>
+        <div class="brand"><svg class="logo" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.2V8H4.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>chronist</div>
         <select class="proj" value=${project || ""} onChange=${(e) => { setProject(e.target.value); setSelected(new Set()); setPanels(null); setQ(""); }}
           title="Project">
           ${(projects || []).map((p) => html`<option value=${p.name}>${p.name} (${p.runs})</option>`)}
