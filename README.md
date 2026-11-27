@@ -341,6 +341,9 @@ uv venv -p 3.9 .venv && uv pip install -p .venv -e ".[dev]"
 .venv/bin/python bench/bench_store.py --scenario 100k,grouped,1M
 ```
 
+Contributor notes (workflow, architecture, design decisions, how to check
+the UI) are in [CLAUDE.md](https://github.com/ASFaust/chronist/blob/main/CLAUDE.md),
+open work in [docs/BACKLOG.md](https://github.com/ASFaust/chronist/blob/main/docs/BACKLOG.md).
 Benchmark results are in [bench/RESULTS.md](https://github.com/ASFaust/chronist/blob/main/bench/RESULTS.md).
 
 ## Releasing
