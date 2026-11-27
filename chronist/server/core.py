@@ -596,8 +596,10 @@ def group_key(run: dict, group_by: List[str]) -> Tuple:
     for g in group_by:
         if g in ("name", "status"):
             vals.append(run.get(g))
+        elif g.startswith("config.") and g not in cfg:  # "config.name": a config key named like a run field
+            vals.append(cfg.get(g[7:]))
         else:
-            vals.append(cfg.get(g[7:] if g.startswith("config.") else g))
+            vals.append(cfg.get(g))
     return tuple(vals)
 
 

@@ -410,3 +410,24 @@ def test_histograms_offline_sync_and_strict(server):
         strict.log({"v": [1.0, 2.0]})
     strict.log({"v": chronist.Histogram([1.0, 2.0])})  # explicit still fine
     strict.finish()
+
+
+def test_config_keys_colliding_with_run_columns(server):
+    """Regression (0.1.1): config keys named like run columns broke RunSet.config()."""
+    cfg = {"tags": ["a", "b"], "name": "cfg-name", "status": "cfg-status", "steps": 123, "created": "yesterday",
+           "run_id": "cfg-id", "config.tags": "already-prefixed", "lr": 0.1}
+    run = chronist.init(project="p", name="real-name", url=server.url, config=cfg, tags=["t1"], code=None)
+    run.log({"loss": 0.5}, step=7)
+    run.finish()
+    for kw in ({"url": server.url}, {"data_dir": server.data_dir}):
+        for df_kind in ("pandas", "polars", "dict"):
+            df = chronist.runs("", project="p", dataframe=df_kind, **kw).config(summary=True)
+            col = (lambda c: df[c][0]) if df_kind != "pandas" else (lambda c: df[c].iloc[0])
+            assert col("name") == "real-name" and col("status") == "finished" and col("tags") == "t1"
+            assert col("steps") == 7 and col("run_id") == run.id
+            assert col("config.name") == "cfg-name" and col("config.status") == "cfg-status"
+            assert col("config.steps") == 123
+            assert col("config.created") == "yesterday" and col("config.run_id") == "cfg-id"
+            # a real "config.tags" key keeps its name; the colliding "tags" moves past it
+            assert col("config.tags") == "already-prefixed" and col("config.config.tags") == "['a', 'b']"
+            assert col("lr") == 0.1 and col("last(loss)") == 0.5

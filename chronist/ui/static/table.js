@@ -1,6 +1,6 @@
 // Run table: virtualized rows, sortable, selectable columns.
 import { html, useState, useRef, useEffect, useMemo } from "./vendor/htm-preact.module.js";
-import { fmtAgo, fmtNum, fmtStep, fmtValue, runFieldValue, slotColor, slotDash } from "./util.js";
+import { configCol, fmtAgo, fmtNum, fmtStep, fmtValue, runFieldValue, slotColor, slotDash } from "./util.js";
 
 const ROW_H = 30;
 
@@ -112,7 +112,7 @@ function ColumnPicker({ keys, cols, onCols, onClose }) {
     return () => document.removeEventListener("mousedown", h);
   }, []);
   const all = [
-    ...keys.config.map((k) => ({ key: k.key, kind: "config" })),
+    ...keys.config.map((k) => ({ key: configCol(k.key), kind: "config" })),
     ...keys.metrics.map((m) => ({ key: `last(${m})`, kind: "metric" })),
   ].filter((k) => k.key.toLowerCase().includes(f.toLowerCase()));
   const toggle = (k) => onCols(cols.includes(k) ? cols.filter((c) => c !== k) : [...cols, k]);

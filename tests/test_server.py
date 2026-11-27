@@ -271,3 +271,14 @@ def test_gc_blobs_and_vacuum(tmp_path):
         assert r.status_code == 200 and r.json()["blobs_removed"] == 0
     finally:
         core.close()
+
+
+def test_group_by_config_key_named_like_run_field(client):
+    for i, (cfg_name, nested) in enumerate([("a", 1), ("a", 2), ("b", 1)]):
+        rid = mkrun(client, uid=f"g{i}", name=f"run{i}", config={"name": cfg_name, "config": {"lr": nested}})["id"]
+        log(client, rid, {"x": (range(10), [float(i)] * 10)})
+    groups = lambda g: sorted(tuple(x["group"].values()) for x in client.post(
+        "/api/series", json={"q": "", "project": "p", "keys": ["x"], "group_by": [g]}).json()["groups"])
+    assert groups("name") == [("run0",), ("run1",), ("run2",)]   # run field
+    assert groups("config.name") == [("a",), ("b",)]              # the colliding config key
+    assert groups("config.lr") == [(1,), (2,)]                    # a real nested "config.lr" key wins

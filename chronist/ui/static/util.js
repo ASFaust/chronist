@@ -148,13 +148,24 @@ export function newHistPanel(key = "", extra = {}) {
            range: null, step: null, ...extra };
 }
 
+// Run-record fields; a config key with one of these names is addressed as
+// "config.<key>" in table columns and grouping (same rule as RunSet.config()).
+export const RUN_FIELDS = new Set(["id", "uid", "project", "name", "status", "created", "updated", "heartbeat",
+  "finished", "notes", "steps", "meta", "tags", "config", "summary", "code", "keys", "run_id"]);
+
+export function configCol(key) {
+  return RUN_FIELDS.has(key) || key.startsWith("last(") ? "config." + key : key;
+}
+
 export function runFieldValue(run, key) {
+  const cfg = run.config || {};
   if (key.startsWith("last(")) {
     const s = run.summary && run.summary[key.slice(5, -1)];
     return s ? s.value : undefined;
   }
-  if (key in run && key !== "config" && key !== "summary") return run[key];
-  return run.config ? run.config[key] : undefined;
+  if (key.startsWith("config.") && !(key in cfg)) return cfg[key.slice(7)];  // prefixed colliding key
+  if (RUN_FIELDS.has(key)) return run[key];
+  return cfg[key];
 }
 
 export function cmpValues(a, b) {

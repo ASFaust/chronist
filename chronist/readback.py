@@ -327,6 +327,17 @@ def _open_source(url=None, token=None, data_dir=None):
 
 
 # ---------------------------------------------------------------- public API
+RUN_COLUMNS = ("run_id", "name", "status", "tags", "steps", "created")
+
+
+def config_column(key: str, reserved) -> str:
+    """'config.'-prefix a colliding config key until its name is free."""
+    name = key
+    while name in reserved:
+        name = "config." + name
+    return name
+
+
 class RunSet:
     """A queried set of runs. Iterable over run dicts."""
 
@@ -352,17 +363,29 @@ class RunSet:
         return [r["id"] for r in self.runs]
 
     def config(self, summary: bool = False):
-        """One row per run: id, name, status, tags, steps + flattened config
-        (+ ``last(<key>)`` columns if summary=True)."""
+        """One row per run: run_id, name, status, tags, steps, created +
+        flattened config (+ ``last(<key>)`` columns if summary=True).
+        A config key that collides with one of those columns is renamed
+        ``config.<key>`` (e.g. a config key ``tags`` -> column ``config.tags``),
+        prefixed again if that name is taken too; other keys keep their name."""
         keys: List[str] = []
         for r in self.runs:
             for k in r["config"]:
                 if k not in keys:
                     keys.append(k)
-        cols: Dict[str, list] = {c: [] for c in ("run_id", "name", "status", "tags", "steps", "created")}
-        for k in keys:
-            cols[k] = []
+        cols: Dict[str, list] = {c: [] for c in RUN_COLUMNS}
         skeys: List[str] = sorted({k for r in self.runs for k in r.get("summary", {})}) if summary else []
+        fixed = set(RUN_COLUMNS) | {f"last({k})" for k in skeys}
+        taken = fixed | set(keys)  # keys that don't collide keep their name
+        colname = {}
+        for k in keys:
+            if k in fixed:
+                colname[k] = config_column(k, taken)
+                taken.add(colname[k])
+            else:
+                colname[k] = k
+        for k in keys:
+            cols[colname[k]] = []
         for k in skeys:
             cols[f"last({k})"] = []
         for r in self.runs:
@@ -374,7 +397,7 @@ class RunSet:
             cols["created"].append(r.get("created"))
             for k in keys:
                 v = r["config"].get(k)
-                cols[k].append(str(v) if isinstance(v, list) else v)
+                cols[colname[k]].append(str(v) if isinstance(v, list) else v)
             for k in skeys:
                 s = r["summary"].get(k)
                 cols[f"last({k})"].append(None if s is None else s["value"])

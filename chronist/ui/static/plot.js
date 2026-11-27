@@ -4,7 +4,7 @@ import { html, useState, useRef, useEffect, useMemo } from "./vendor/htm-preact.
 import uPlot from "./vendor/uPlot.esm.js";
 import { api } from "./api.js";
 import { MultiSelect, Select, Toggle } from "./widgets.js";
-import { ema, fmtDuration, fmtNum, fmtStep, fmtValue, slotColor, slotDash, throttle, withAlpha, DASHES, isDark } from "./util.js";
+import { configCol, ema, fmtDuration, fmtNum, fmtStep, fmtValue, slotColor, slotDash, throttle, withAlpha, DASHES, isDark } from "./util.js";
 
 const AGG_LABELS = { mean_std: "mean ± std", min_max: "mean, min–max", median_iqr: "median, IQR" };
 const MAX_RUNS_UNGROUPED = 100;
@@ -351,6 +351,8 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
   // ---- controls ----
   const metricOpts = keys.metrics.map((m) => ({ value: m }));
   const configOpts = keys.config.map((k) => ({ value: k.key, kind: `${k.distinct}` }));
+  // grouping goes through the server, where "name"/"status" mean run fields
+  const groupOpts = keys.config.map((k) => ({ value: configCol(k.key), label: k.key, kind: `${k.distinct}` }));
   const xOpts = [{ value: "step", label: "Step" }, { value: "wall", label: "Wall time" },
                  { value: "relative", label: "Relative time" },
                  ...keys.metrics.map((m) => ({ value: m, label: m }))];
@@ -362,7 +364,7 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
       <div class="panel-head">
         <${MultiSelect} label="Metrics" options=${metricOpts} value=${panel.keys} onChange=${(v) => set({ keys: v })} placeholder="choose…" />
         <${Select} label="x" value=${panel.x} options=${xOpts} onChange=${(v) => set({ x: v, range: null })} title="X axis" />
-        <${MultiSelect} label="Group" options=${configOpts} value=${panel.group} onChange=${(v) => set({ group: v })} title="Group runs by config keys and aggregate" />
+        <${MultiSelect} label="Group" options=${groupOpts} value=${panel.group} onChange=${(v) => set({ group: v })} title="Group runs by config keys and aggregate" />
         ${grouped && html`<${Select} label="Agg" value=${panel.agg}
             options=${Object.entries(AGG_LABELS).map(([value, label]) => ({ value, label }))} onChange=${(v) => set({ agg: v })} />`}
         ${!grouped && html`<${MultiSelect} label="Color" single=${true} options=${configOpts}
