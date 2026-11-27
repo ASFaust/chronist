@@ -1,15 +1,16 @@
 """Run query language -> parameterized SQL.
 
-    env = "seaquest" and model.arch = "lstm" and steps >= 20000
-    (optim.lr < 1e-3 or tags contains "baseline") and not model.dropout exists
-    last(loss) < 0.1 and status in [running, finished]
+    config.env = "seaquest" and config.model.arch = "lstm" and steps >= 20000
+    (config.optim.lr < 1e-3 or tags contains "baseline") and not config.model.dropout exists
+    metric.loss < 0.1 and status in [running, finished]
 
-Fields
-    any flattened config key (``model.arch``); for odd names or names that
-    collide with run fields use backticks (```tags```) or the ``config.``
-    prefix (``config.tags``, as in tables and the UI);
-    run fields: id, name, status, tags, notes, created, updated, heartbeat, steps;
-    metric summaries: ``last(<metric>)``.
+Fields (every data source but run fields has a prefix, so names never clash)
+    config.<key>   a flattened config key (``config.model.arch``); a sub-config
+                   named ``config`` is ``config.config.<key>``; odd key names
+                   are quoted after the prefix: ``config.`learning rate```
+    metric.<key>   a metric's latest value (``metric.loss``, ``metric.train/loss``)
+    run fields     id / run_id, name, status, tags, notes, created, updated,
+                   heartbeat, steps (no prefix)
 Operators
     = != < <= > >= , in [..], not in [..], contains, exists, and, or, not, ( )
 Values
@@ -17,8 +18,9 @@ Values
 
 Semantics: ``a != x`` is ``not (a = x)``, so it also matches runs that do not
 have ``a`` at all. ``contains`` is a case-insensitive substring test for
-strings and an element test for lists (``layers contains 64``). Nothing is
-ever evaluated as Python.
+strings and an element test for lists (``config.layers contains 64``).
+Nothing is ever evaluated as Python. The same names are used for table
+columns, sorting and grouping.
 """
 from __future__ import annotations
 
@@ -122,6 +124,7 @@ Node = Union[Cmp, BoolOp, Not]
 
 RUN_FIELDS = {
     "id": ("r.id", "num"),
+    "run_id": ("r.id", "num"),
     "name": ("r.name", "text"),
     "status": ("r.status", "text"),
     "notes": ("r.notes", "text"),
@@ -131,6 +134,25 @@ RUN_FIELDS = {
     "steps": ("r.steps", "num"),
     "tags": (None, "tags"),
 }
+
+
+# Every data source except run fields has its own prefix, so names are never
+# ambiguous: config keys are config.<key>, metric values metric.<key>.
+PREFIXES = {"config.": "config", "metric.": "last"}
+
+
+def field_from_name(text: str) -> Optional[Field]:
+    for p, kind in PREFIXES.items():
+        if text.startswith(p) and len(text) > len(p):
+            return Field(kind, text[len(p):])
+    if text in RUN_FIELDS:
+        return Field("run", text)
+    return None
+
+
+def unknown_field_error(text: str, pos: int) -> QueryError:
+    return QueryError(f"unknown field {text!r}: config keys are written config.{text}, metric values "
+                      f"metric.{text}; run fields are {', '.join(sorted(k for k in RUN_FIELDS if k != 'id'))}", pos)
 
 
 class Parser:
@@ -193,21 +215,19 @@ class Parser:
 
     def parse_field(self) -> Field:
         t = self.next()
-        if t.kind == "bq":
-            return Field("config", t.value)
         if t.kind == "ident":
-            if t.text == "last" and self.peek().kind == "punct" and self.peek().text == "(":
-                self.next()
-                a = self.next()
-                if a.kind in ("ident", "str", "bq"):
-                    name = a.text if a.kind == "ident" else a.value
-                else:
-                    raise QueryError("expected metric name in last(...)", a.pos)
-                self.expect_punct(")")
-                return Field("last", name)
-            if t.text in RUN_FIELDS:
-                return Field("run", t.text)
-            return Field("config", t.text)
+            nxt = self.peek()
+            if t.text in PREFIXES and nxt.kind == "bq" and nxt.pos == t.pos + len(t.text):
+                self.next()  # config.`odd key name`
+                return Field(PREFIXES[t.text], nxt.value)
+            f = field_from_name(t.text)
+            if f is not None:
+                return f
+            if t.text == "last" and nxt.kind == "punct" and nxt.text == "(":
+                raise QueryError("last(<metric>) is now written metric.<metric>", t.pos)
+            raise unknown_field_error(t.text, t.pos)
+        if t.kind == "bq":
+            raise QueryError(f"write config.`{t.value}` for a config key (or metric.`{t.value}`)", t.pos)
         raise QueryError(f"expected a field name, got {t.text or 'end of query'!r}", t.pos)
 
     def parse_value(self) -> Any:
@@ -329,18 +349,8 @@ class Compiler:
             raise QueryError(f"last({key}) must be compared with a number")
         return f"EXISTS ({base} AND s.value {SQL_OPS[op]} {self.p(float(v))})"
 
-    def key_match(self, key: str) -> str:
-        """SQL for "c.key is this config key". ``config.<k>`` means the key
-        ``config.<k>`` if the run has one, otherwise ``<k>`` (how config keys
-        named like run fields appear in tables and the UI)."""
-        if key.startswith("config.") and len(key) > 7:
-            full = self.p(key)
-            exists = f"EXISTS (SELECT 1 FROM config c2 WHERE c2.run_id=r.id AND c2.key={self.p(key)})"
-            return f"c.key = CASE WHEN {exists} THEN {full} ELSE {self.p(key[7:])} END"
-        return f"c.key={self.p(key)}"
-
     def config_field(self, key: str, op: str, v: Any) -> str:
-        base = f"SELECT 1 FROM config c WHERE c.run_id=r.id AND {self.key_match(key)}"
+        base = f"SELECT 1 FROM config c WHERE c.run_id=r.id AND c.key={self.p(key)}"
         if op == "exists":
             return f"EXISTS ({base})"
         if op == "contains":
@@ -404,14 +414,10 @@ def completion_context(src: str) -> CompletionContext:
         t = prev[i] if 0 <= i < len(prev) else None
         if t is None:
             return None
-        if t.kind == "bq":
-            return Field("config", t.value)
+        if t.kind == "bq" and i >= 1 and prev[i - 1].kind == "ident" and prev[i - 1].text in PREFIXES:
+            return Field(PREFIXES[prev[i - 1].text], t.value)
         if t.kind == "ident":
-            return Field("run", t.text) if t.text in RUN_FIELDS else Field("config", t.text)
-        if t.kind == "punct" and t.text == ")" and i >= 3 and prev[i - 2].kind in ("ident", "str") \
-                and prev[i - 3].text == "(" and i >= 4 and prev[i - 4].text == "last":
-            a = prev[i - 2]
-            return Field("last", a.text if a.kind == "ident" else a.value)
+            return field_from_name(t.text)
         return None
 
     last = prev[-1] if prev else None

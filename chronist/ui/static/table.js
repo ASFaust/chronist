@@ -1,6 +1,6 @@
 // Run table: virtualized rows, sortable, selectable columns.
 import { html, useState, useRef, useEffect, useMemo } from "./vendor/htm-preact.module.js";
-import { configCol, fmtAgo, fmtNum, fmtStep, fmtValue, runFieldValue, slotColor, slotDash } from "./util.js";
+import { configCol, metricCol, fmtAgo, fmtNum, fmtStep, fmtValue, runFieldValue, slotColor, slotDash } from "./util.js";
 
 const ROW_H = 30;
 
@@ -50,7 +50,7 @@ export function RunTable({ runs, selected, slots, cols, sort, onSort, onToggle, 
   const columns = useMemo(() => [
     ...BASE_COLS,
     ...cols.map((k) => ({ key: k, label: k, width: 110, extra: true,
-                          num: k.startsWith("last(") || runs.slice(0, 50).some((r) => typeof runFieldValue(r, k) === "number") })),
+                          num: k.startsWith("metric.") || runs.slice(0, 50).some((r) => typeof runFieldValue(r, k) === "number") })),
   ], [cols, runs]);
   const template = "34px " + columns.map((c) => c.width + "px").join(" ") + " 1fr";
 
@@ -113,7 +113,7 @@ function ColumnPicker({ keys, cols, onCols, onClose }) {
   }, []);
   const all = [
     ...keys.config.map((k) => ({ key: configCol(k.key), kind: "config" })),
-    ...keys.metrics.map((m) => ({ key: `last(${m})`, kind: "metric" })),
+    ...keys.metrics.map((m) => ({ key: metricCol(m), kind: "metric" })),
   ].filter((k) => k.key.toLowerCase().includes(f.toLowerCase()));
   const toggle = (k) => onCols(cols.includes(k) ? cols.filter((c) => c !== k) : [...cols, k]);
   return html`

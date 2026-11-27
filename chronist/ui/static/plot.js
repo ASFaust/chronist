@@ -4,7 +4,7 @@ import { html, useState, useRef, useEffect, useMemo } from "./vendor/htm-preact.
 import uPlot from "./vendor/uPlot.esm.js";
 import { api } from "./api.js";
 import { MultiSelect, Select, Toggle } from "./widgets.js";
-import { configCol, ema, fmtDuration, fmtNum, fmtStep, fmtValue, slotColor, slotDash, throttle, withAlpha, DASHES, isDark } from "./util.js";
+import { configCol, runFieldValue, ema, fmtDuration, fmtNum, fmtStep, fmtValue, slotColor, slotDash, throttle, withAlpha, DASHES, isDark } from "./util.js";
 
 const AGG_LABELS = { mean_std: "mean ± std", min_max: "mean, min–max", median_iqr: "median, IQR" };
 const MAX_RUNS_UNGROUPED = 100;
@@ -34,7 +34,7 @@ function buildLines(data, panel, runsById, slots, colorSlots) {
     const run = runsById.get(s.run_id);
     if (!run) continue;
     let slot = slots.get(s.run_id) ?? 0;
-    if (panel.colorBy) slot = colorSlots.values.get(JSON.stringify(run.config[panel.colorBy] ?? null)) ?? 0;
+    if (panel.colorBy) slot = colorSlots.values.get(JSON.stringify(runFieldValue(run, panel.colorBy) ?? null)) ?? 0;
     const down = s.width > 1;
     const dash = multiKey ? DASHES[(keyIdx.get(s.key) || 0) % DASHES.length] : slotDash(slot);
     lines.push({
@@ -218,7 +218,7 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
   const colorSlots = useMemo(() => {
     const values = new Map();
     if (panel.colorBy) {
-      const vals = [...new Set(plotRuns.map((r) => JSON.stringify(r.config[panel.colorBy] ?? null)))].sort();
+      const vals = [...new Set(plotRuns.map((r) => JSON.stringify(runFieldValue(r, panel.colorBy) ?? null)))].sort();
       vals.forEach((v, i) => values.set(v, i));
     }
     const groups = new Map();
@@ -350,9 +350,8 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
 
   // ---- controls ----
   const metricOpts = keys.metrics.map((m) => ({ value: m }));
-  const configOpts = keys.config.map((k) => ({ value: k.key, kind: `${k.distinct}` }));
-  // grouping goes through the server, where "name"/"status" mean run fields
-  const groupOpts = keys.config.map((k) => ({ value: configCol(k.key), label: k.key, kind: `${k.distinct}` }));
+  const configOpts = keys.config.map((k) => ({ value: configCol(k.key), kind: `${k.distinct}` }));
+  const groupOpts = keys.config.map((k) => ({ value: configCol(k.key), label: configCol(k.key), kind: `${k.distinct}` }));
   const xOpts = [{ value: "step", label: "Step" }, { value: "wall", label: "Wall time" },
                  { value: "relative", label: "Relative time" },
                  ...keys.metrics.map((m) => ({ value: m, label: m }))];

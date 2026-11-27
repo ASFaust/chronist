@@ -227,7 +227,7 @@ because anyone who can reach it sees everything.
 ### UI
 
 - **Run table:** query bar with autocomplete for keys and values, sortable
-  columns, any config key or `last(metric)` as a column, shift-click range
+  columns, any `config.<key>` or `metric.<key>` as a column, shift-click range
   select, bulk tag/delete, and a run drawer (config, summary, git/command
   metadata, tags, notes, rename, delete).
 - **Panels:** any metrics from any runs on one plot. X axis: step, wall time,
@@ -245,17 +245,28 @@ aggregate over all matching runs (up to 1000).
 ## Query language
 
 ```
-env = "seaquest" and model.arch = "lstm" and steps >= 20000
-(optim.lr < 1e-3 or tags contains "baseline") and not model.dropout exists
-last(loss) < 0.1 and status in [running, finished] and created > 2026-11-01
+config.env = "seaquest" and config.model.arch = "lstm" and steps >= 20000
+(config.optim.lr < 1e-3 or tags contains "baseline") and not config.model.dropout exists
+metric.loss < 0.1 and status in [running, finished] and created > 2026-11-01
 ```
 
-- Fields: any flattened config key; run fields `id name status tags notes
-  created updated heartbeat steps`; metric summaries `last(<key>)`. Use
-  backticks for odd key names or keys that collide with run fields: `` `name` = "x" ``.
+- Every data source except run fields has its own prefix, so names never clash:
+  - `config.<key>`: a flattened config key (`config.model.arch`). A sub-config
+    named `config` is `config.config.<key>`. Odd key names are quoted after
+    the prefix: ``config.`learning rate` ``.
+  - `metric.<key>`: a metric's latest value (`metric.loss`, `metric.train/loss`).
+  - Run fields have no prefix: `run_id name status tags notes created updated
+    heartbeat steps`.
+- An unprefixed name that isn't a run field is an error with a hint (`lr < 0.1`
+  → "config keys are written config.lr"), never a silent empty result.
+- The same names are used everywhere: table columns in the UI,
+  `runs.config()` columns, sorting, grouping and autocomplete. A column name can
+  be pasted straight into a query.
 - Operators: `= != < <= > >=`, `in [...]`, `not in [...]`, `contains`, `exists`,
-  `and`, `or`, `not`, parentheses. Bare words are strings (`arch = lstm`).
-- `a != x` means `not (a = x)`, so it also matches runs without `a`.
+  `and`, `or`, `not`, parentheses. Bare words are strings (`config.arch = lstm`).
+- `contains` is a case-insensitive substring test on strings and an element test
+  on lists (`config.layers contains 64`). `a != x` means `not (a = x)`, so it
+  also matches runs without `a`.
 
 It compiles to parameterized SQL. Nothing is evaluated.
 
@@ -263,9 +274,9 @@ It compiles to parameterized SQL. Nothing is evaluated.
 
 ```python
 import chronist
-runs = chronist.runs('env = "seaquest" and model.arch = "lstm"', project="bptt-free")
-runs.config()                                  # one row per run: id, name, status, ..., flattened config
-runs.config(summary=True)                      # + last(<metric>) columns
+runs = chronist.runs('config.env = "seaquest" and config.model.arch = "lstm"', project="bptt-free")
+runs.config()                                  # one row per run: run_id, name, status, ..., config.<key> columns
+runs.config(summary=True)                      # + metric.<key> columns (latest values)
 df = runs.history(["loss", "return"])          # long: run_id, run, key, step, value, wall_time
 df = runs.history(["loss"], max_points=2000)   # downsampled: value = bucket mean, + min, max, count
 ```

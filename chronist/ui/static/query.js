@@ -80,7 +80,7 @@ export function QueryInput({ project, value, error, onChange }) {
       <div class=${"query-box" + (error ? " has-error" : "")}>
         <svg class="query-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
         <input ref=${ref} value=${text} spellcheck="false" autocomplete="off"
-          placeholder='Filter runs, e.g.  model.arch = "lstm" and last(loss) < 0.1'
+          placeholder='Filter runs, e.g.  config.model.arch = "lstm" and metric.loss < 0.1'
           onInput=${onInput} onKeyDown=${onKeyDown}
           onFocus=${() => suggestNow(text)} onClick=${() => suggestNow(text)}
           onBlur=${() => setTimeout(() => setOpen(false), 150)} />

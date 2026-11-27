@@ -49,7 +49,7 @@ def test_create_log_read(client):
     assert len(r["step"]) == 150 and r["value"][0] == 1.0 and r["value"][99] == 0.01
     r = client.get(f"/api/runs/{rid}/metrics/loss", params={"max_points": 10}).json()
     assert len(r["step"]) <= 10 and sum(r["count"]) == 150
-    runs = client.get("/api/runs", params={"project": "p", "q": "model.arch = lstm"}).json()
+    runs = client.get("/api/runs", params={"project": "p", "q": "config.model.arch = lstm"}).json()
     assert runs["total"] == 1
     got = runs["runs"][0]
     assert got["steps"] == 149 and got["summary"]["loss"]["value"] == 9.0
@@ -77,7 +77,7 @@ def test_errors(client):
     assert client.post(f"/api/runs/{rid}/log", json={"points": {"x": {"step": [1, 2], "value": [1]}}}).status_code == 400
     assert client.post(f"/api/runs/{rid}/log", content=b"garbage",
                        headers={"Content-Type": "application/msgpack"}).status_code == 400
-    r = client.get("/api/runs", params={"q": "env ="})
+    r = client.get("/api/runs", params={"q": "config.env ="})
     assert r.status_code == 400 and "expected a value" in r.json()["error"]
     assert client.post("/api/runs", json={"project": "p"}).status_code == 400
 
@@ -116,11 +116,11 @@ def test_series_and_grouping(client):
             off = 0 if arch == "lstm" else 10
             log(client, rid, {"loss": (range(n), [off + seed + 0.0] * n), "acc": (range(n), [float(s) for s in range(n)])})
     r = client.post("/api/series", json={"q": "", "project": "p", "keys": ["loss"], "max_points": 100,
-                                         "group_by": ["arch"]}).json()
+                                         "group_by": ["config.arch"]}).json()
     assert len(r["series"]) == 6
     assert all(len(s["step"]) <= 100 for s in r["series"])
     assert r["start"] == 0 and r["end"] == 1000
-    groups = {g["group"]["arch"]: g for g in r["groups"]}
+    groups = {g["group"]["config.arch"]: g for g in r["groups"]}
     assert groups["lstm"]["center"][0] == pytest.approx(1.0)
     assert groups["lstm"]["lo"][0] == pytest.approx(1 - (2 / 3) ** 0.5)
     assert groups["gru"]["center"][0] == pytest.approx(11.0)
@@ -133,14 +133,14 @@ def test_series_and_grouping(client):
     s = r["series"][0]
     assert s["x"][:3] == [0.0, 1.0, 2.0]
     r = client.post("/api/series", json={"runs": [ids[("lstm", 0)]], "keys": ["loss"], "agg": "median_iqr",
-                                         "group_by": ["arch"], "x": "relative"}).json()
+                                         "group_by": ["config.arch"], "x": "relative"}).json()
     assert r["groups"][0]["center"][0] == 0.0
 
 
 def test_suggest_keys_projects(client):
     mkrun(client, uid="a", config={"model": {"arch": "lstm"}})
     mkrun(client, uid="b", config={"model": {"arch": "gru"}})
-    r = client.get("/api/suggest", params={"project": "p", "text": "model.arch = "}).json()
+    r = client.get("/api/suggest", params={"project": "p", "text": "config.model.arch = "}).json()
     assert {i["label"] for i in r["items"]} == {"lstm", "gru"}
     k = client.get("/api/keys", params={"project": "p"}).json()
     assert k["config"][0]["key"] == "model.arch"
@@ -273,12 +273,16 @@ def test_gc_blobs_and_vacuum(tmp_path):
         core.close()
 
 
-def test_group_by_config_key_named_like_run_field(client):
+def test_group_by_prefixed_names(client):
     for i, (cfg_name, nested) in enumerate([("a", 1), ("a", 2), ("b", 1)]):
-        rid = mkrun(client, uid=f"g{i}", name=f"run{i}", config={"name": cfg_name, "config": {"lr": nested}})["id"]
+        rid = mkrun(client, uid=f"g{i}", name=f"run{i}", config={"name": cfg_name, "config": {"lr": nested}},
+                    tags=["x"] if i < 2 else [])["id"]
         log(client, rid, {"x": (range(10), [float(i)] * 10)})
-    groups = lambda g: sorted(tuple(x["group"].values()) for x in client.post(
-        "/api/series", json={"q": "", "project": "p", "keys": ["x"], "group_by": [g]}).json()["groups"])
-    assert groups("name") == [("run0",), ("run1",), ("run2",)]   # run field
-    assert groups("config.name") == [("a",), ("b",)]              # the colliding config key
-    assert groups("config.lr") == [(1,), (2,)]                    # a real nested "config.lr" key wins
+    def groups(g):
+        r = client.post("/api/series", json={"q": "", "project": "p", "keys": ["x"], "group_by": [g]})
+        return r.status_code, sorted(tuple(x["group"].values()) for x in r.json().get("groups", []))
+    assert groups("name") == (200, [("run0",), ("run1",), ("run2",)])  # run field
+    assert groups("config.name") == (200, [("a",), ("b",)])            # config key "name"
+    assert groups("config.config.lr") == (200, [(1,), (2,)])           # sub-config named "config"
+    assert groups("tags") == (200, [("",), ("x",)])
+    assert groups("lr")[0] == 400 and groups("metric.x")[0] == 400     # unprefixed / not groupable

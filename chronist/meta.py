@@ -559,17 +559,19 @@ class MetadataStore:
         return [r[0] for r in self._r().execute(sql, params)]
 
     def _order_sql(self, order: str, params: list) -> str:
-        if order in ("id", "name", "status", "created", "updated", "steps", "heartbeat"):
+        """Sort key, named like query fields and table columns."""
+        if order in ("id", "run_id"):
+            return "r.id"
+        if order in ("name", "status", "created", "updated", "steps", "heartbeat", "notes"):
             return f"r.{order}"
-        if order.startswith("last(") and order.endswith(")"):
-            params.append(order[5:-1])
+        f = Q.field_from_name(order)
+        if f is not None and f.kind == "last":
+            params.append(f.name)
             return "(SELECT s.value FROM summary s WHERE s.run_id=r.id AND s.key=?)"
-        if order.startswith("config.") and len(order) > 7:  # same rule as the query language
-            params += [order, order, order[7:]]
-            return ("(SELECT coalesce(c.v_num, c.v_text) FROM config c WHERE c.run_id=r.id AND c.key = CASE WHEN "
-                    "EXISTS (SELECT 1 FROM config c2 WHERE c2.run_id=r.id AND c2.key=?) THEN ? ELSE ? END)")
-        params.append(order)
-        return "(SELECT coalesce(c.v_num, c.v_text) FROM config c WHERE c.run_id=r.id AND c.key=?)"
+        if f is not None and f.kind == "config":
+            params.append(f.name)
+            return "(SELECT coalesce(c.v_num, c.v_text) FROM config c WHERE c.run_id=r.id AND c.key=?)"
+        raise Q.QueryError(f"cannot sort by {order!r}: use a run field, config.<key> or metric.<key>")
 
     def get_runs(self, ids: List[int], include: Iterable[str] = ("config", "summary", "tags")) -> List[dict]:
         """Full run records, in the order of ``ids``."""
@@ -668,22 +670,21 @@ class MetadataStore:
         pref = ctx.prefix.lower()
         if ctx.kind == "field":
             for f in Q.RUN_FIELDS:
-                items.append({"label": f, "insert": f, "kind": "run field"})
+                if f != "id":  # run_id is the documented name
+                    items.append({"label": f, "insert": f, "kind": "run field"})
             for k in self.config_keys(project):
-                if not _plain_ident(k["key"]):
-                    ins = f"`{k['key']}`"
-                elif k["key"] in Q.RUN_FIELDS:
-                    ins = f"config.{k['key']}"  # same name as in tables and the UI
-                else:
-                    ins = k["key"]
-                items.append({"label": k["key"], "insert": ins, "kind": "config",
+                key = k["key"]
+                ins = f"config.{key}" if _plain_ident(key) else f"config.`{key}`"
+                items.append({"label": f"config.{key}", "insert": ins, "kind": "config",
                               "detail": f"{k['distinct']} values"})
             for m in self.metric_keys(project):
-                arg = m if _plain_ident(m) else json.dumps(m)
-                items.append({"label": f"last({m})", "insert": f"last({arg})", "kind": "metric"})
+                ins = f"metric.{m}" if _plain_ident(m) else f"metric.`{m}`"
+                items.append({"label": f"metric.{m}", "insert": ins, "kind": "metric"})
             items.append({"label": "not", "insert": "not", "kind": "keyword"})
+            # match the typed text anywhere, but also without its prefix: "arch" finds config.model.arch
             items = [i for i in items if pref in i["label"].lower()]
-            items.sort(key=lambda i: (not i["label"].lower().startswith(pref), i["kind"] != "config", i["label"]))
+            items.sort(key=lambda i: (not i["label"].lower().startswith(pref),
+                                      {"config": 0, "metric": 1, "run field": 2}.get(i["kind"], 3), i["label"]))
         elif ctx.kind == "value" and ctx.field is not None:
             vals: List[Tuple[Any, int]] = []
             f = ctx.field

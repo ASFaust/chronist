@@ -534,7 +534,7 @@ def series(meta: MetadataStore, store: MetricStore, run_ids: List[int], keys: Li
     group_by: config keys; runs with equal values are aggregated per bucket.
     agg: "mean_std" | "min_max" | "median_iqr".
     """
-    runs = {r["id"]: r for r in meta.get_runs(run_ids, include=("config",))}
+    runs = {r["id"]: r for r in meta.get_runs(run_ids, include=("config", "tags"))}
     run_ids = [r for r in run_ids if r in runs]
     xkey = x if x not in ("step", "wall", "relative") else None
     read_keys = list(dict.fromkeys(keys + ([xkey] if xkey else [])))
@@ -591,15 +591,21 @@ def _clean(a: np.ndarray) -> list:
 
 
 def group_key(run: dict, group_by: List[str]) -> Tuple:
+    """Group values for a run. Fields use query-language names: config.<key>,
+    or the run fields name / status / tags."""
+    from ..query import field_from_name
     cfg = run.get("config", {})
     vals = []
     for g in group_by:
-        if g in ("name", "status"):
-            vals.append(run.get(g))
-        elif g.startswith("config.") and g not in cfg:  # "config.name": a config key named like a run field
-            vals.append(cfg.get(g[7:]))
+        f = field_from_name(g)
+        if f is None or f.kind == "last":
+            raise ValueError(f"cannot group by {g!r}: use config.<key> or name / status / tags")
+        if f.kind == "config":
+            vals.append(cfg.get(f.name))
+        elif f.name == "tags":
+            vals.append(",".join(run.get("tags") or []))
         else:
-            vals.append(cfg.get(g))
+            vals.append(run.get(f.name if f.name != "run_id" else "id"))
     return tuple(vals)
 
 

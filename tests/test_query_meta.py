@@ -32,34 +32,37 @@ def names(meta, q, project="proj"):
 
 @pytest.mark.parametrize("q,expected", [
     ("", ["a", "b", "c", "d"]),
-    ('env = "seaquest"', ["a", "b"]),
-    ('env = seaquest and model.arch = "lstm"', ["a"]),
-    ('env = "seaquest" or model.arch = "lstm"', ["a", "b", "c"]),
-    ("model.layers >= 3", ["b"]),
-    ("optim.lr < 5e-4", ["a", "c"]),
-    ("optim.lr = 0.0003", ["a", "c"]),
-    ("model.dropout exists", ["c"]),
-    ("not model.dropout exists", ["a", "b", "d"]),
-    ('model.arch != "lstm"', ["b", "d"]),
-    ('model.arch in ["gru", "transformer"]', ["b", "d"]),
-    ('model.arch not in [gru, transformer]', ["a", "c"]),
-    ('model.arch contains "LST"', ["a", "c"]),
-    ("fast = true", ["a"]),
-    ("fast = false", ["b"]),
-    ("note = null", ["c"]),
+    ('config.env = "seaquest"', ["a", "b"]),
+    ('config.env = seaquest and config.model.arch = "lstm"', ["a"]),
+    ('config.env = "seaquest" or config.model.arch = "lstm"', ["a", "b", "c"]),
+    ("config.model.layers >= 3", ["b"]),
+    ("config.optim.lr < 5e-4", ["a", "c"]),
+    ("config.optim.lr = 0.0003", ["a", "c"]),
+    ("config.model.dropout exists", ["c"]),
+    ("not config.model.dropout exists", ["a", "b", "d"]),
+    ('config.model.arch != "lstm"', ["b", "d"]),
+    ('config.model.arch in ["gru", "transformer"]', ["b", "d"]),
+    ('config.model.arch not in [gru, transformer]', ["a", "c"]),
+    ('config.model.arch contains "LST"', ["a", "c"]),
+    ("config.fast = true", ["a"]),
+    ("config.fast = false", ["b"]),
+    ("config.note = null", ["c"]),
     ('tags contains "baseline"', ["a", "c"]),
     ('tags = v2', ["c"]),
     ("tags exists", ["a", "c"]),
     ("steps >= 2000", ["b", "c", "d"]),
     ("steps > 2000 and steps < 4000", ["c"]),
-    ("last(loss) < 0.4", ["c", "d"]),
-    ("last(return) >= 10", ["c", "d"]),
+    ("metric.loss < 0.4", ["c", "d"]),
+    ("metric.return >= 10", ["c", "d"]),
+    ("metric.loss exists", ["a", "b", "c", "d"]),
     ("status = finished", ["b"]),
     ("status in [running]", ["a", "c", "d"]),
     ('name = "a" or name contains "D"', ["a", "d"]),
-    ("(env = pong or fast = true) and not (model.arch = transformer)", ["a", "c"]),
+    ("(config.env = pong or config.fast = true) and not (config.model.arch = transformer)", ["a", "c"]),
     ("id = 1", ["a"]),
-    ('dims contains "64"', ["d"]),
+    ("run_id = 2", ["b"]),
+    ('config.dims contains "64"', ["d"]),
+    ("config.dims contains 64", ["d"]),
     ("created > 2000-01-01", ["a", "b", "c", "d"]),
     ('created < "2000-01-01T00:00"', []),
 ])
@@ -68,23 +71,34 @@ def test_queries(meta, q, expected):
 
 
 def test_project_filter(meta):
-    assert names(meta, 'env = "seaquest"', project="other") == ["x"]
-    assert names(meta, 'env = "seaquest"', project=None) == ["a", "b", "x"]
+    assert names(meta, 'config.env = "seaquest"', project="other") == ["x"]
+    assert names(meta, 'config.env = "seaquest"', project=None) == ["a", "b", "x"]
 
 
 @pytest.mark.parametrize("bad", [
-    "env =", "env seaquest", "(env = 1", "last(loss) < abc", "steps > foo",
-    "env = 'unterminated", "and", "env = 1 2", "tags < 3", "fast < true", "env = [1]",
+    "config.env =", "config.env seaquest", "(config.env = 1", "metric.loss < abc", "steps > foo",
+    "config.env = 'unterminated", "and", "config.env = 1 2", "tags < 3", "config.fast < true", "config.env = [1]",
+    # unprefixed names and the old forms are errors (with a hint), never silently empty
+    "env = 1", "lr < 0.1", "last(loss) < 1", "`tags` contains g2", "config. = 1",
 ])
 def test_errors(bad):
     with pytest.raises(Q.QueryError):
         Q.to_sql(bad)
 
 
+def test_error_hints():
+    with pytest.raises(Q.QueryError, match="config.lr"):
+        Q.to_sql("lr < 0.1")
+    with pytest.raises(Q.QueryError, match="metric.<metric>"):
+        Q.to_sql("last(loss) < 1")
+    with pytest.raises(Q.QueryError, match="config.`tags`"):
+        Q.to_sql("`tags` contains g2")
+
+
 def test_no_injection(meta):
     q = 'name = "x\\" OR 1=1 --"'
     assert names(meta, q) == []
-    sql, params = Q.to_sql('`weird key"; DROP TABLE runs;` = 1')
+    sql, params = Q.to_sql('config.`weird key"; DROP TABLE runs;` = 1')
     assert "DROP" not in sql and params[0] == 'weird key"; DROP TABLE runs;'
 
 
@@ -123,10 +137,13 @@ def test_patch_delete(meta):
 
 
 def test_order(meta):
-    ids = meta.query_ids("proj", "", order="last(loss)", desc=False)
+    ids = meta.query_ids("proj", "", order="metric.loss", desc=False)
     assert ids == [4, 3, 2, 1]
-    ids = meta.query_ids("proj", "", order="model.layers", desc=True, limit=2)
+    ids = meta.query_ids("proj", "", order="config.model.layers", desc=True, limit=2)
     assert ids == [2, 3] or ids == [2, 1]
+    assert meta.query_ids("proj", "", order="run_id", desc=False) == [1, 2, 3, 4]
+    with pytest.raises(Q.QueryError):
+        meta.query_ids("proj", "", order="model.layers")
 
 
 def labels(res):
@@ -134,27 +151,30 @@ def labels(res):
 
 
 def test_suggest_fields(meta):
-    r = meta.suggest("proj", "mod")
+    r = meta.suggest("proj", "config.mod")
     assert r["context"] == "field" and r["start"] == 0
-    assert labels(r)[:4] == ["model.arch", "model.dropout", "model.layers", "model.dims"][:3] + labels(r)[3:4]
-    r = meta.suggest("proj", 'env = "pong" and la')
-    assert "last(loss)" in labels(r) and r["start"] == len('env = "pong" and ')
+    assert labels(r)[:3] == ["config.model.arch", "config.model.dropout", "config.model.layers"]
+    r = meta.suggest("proj", "arch")  # matches without typing the prefix
+    assert labels(r)[0] == "config.model.arch" and r["items"][0]["insert"] == "config.model.arch"
+    r = meta.suggest("proj", 'config.env = "pong" and lo')
+    assert "metric.loss" in labels(r) and r["start"] == len('config.env = "pong" and ')
+    assert "status" in labels(meta.suggest("proj", "sta"))
 
 
 def test_suggest_values(meta):
-    r = meta.suggest("proj", "model.arch = ")
+    r = meta.suggest("proj", "config.model.arch = ")
     assert r["context"] == "value"
     assert set(labels(r)) == {"lstm", "gru", "transformer"}
-    assert meta.suggest("proj", 'model.arch = "ls')["items"][0]["insert"] == '"lstm"'
-    assert labels(meta.suggest("proj", "model.arch in [gru, "))[0] in {"lstm", "gru", "transformer"}
+    assert meta.suggest("proj", 'config.model.arch = "ls')["items"][0]["insert"] == '"lstm"'
+    assert labels(meta.suggest("proj", "config.model.arch in [gru, "))[0] in {"lstm", "gru", "transformer"}
     assert set(labels(meta.suggest("proj", "status = "))) == {"running", "finished", "crashed"}
     assert set(labels(meta.suggest("proj", "tags contains "))) == {"baseline", "v2"}
 
 
 def test_suggest_operator(meta):
-    assert "=" in labels(meta.suggest("proj", "model.arch "))
-    assert labels(meta.suggest("proj", 'model.arch = "x" ')) == ["and", "or"]
-    assert labels(meta.suggest("proj", "model.arch = lstm ")) == ["and", "or"]
+    assert "=" in labels(meta.suggest("proj", "config.model.arch "))
+    assert labels(meta.suggest("proj", 'config.model.arch = "x" ')) == ["and", "or"]
+    assert labels(meta.suggest("proj", "config.model.arch = lstm ")) == ["and", "or"]
 
 
 def test_high_cardinality_values_not_suggested(tmp_path):
@@ -179,25 +199,25 @@ def listmeta(tmp_path):
 
 @pytest.mark.parametrize("q,expected", [
     ('config.tags contains "g2"', ["a", "c"]),       # reported: returned nothing in 0.1.2
-    ('`tags` contains "g2"', ["a", "c"]),            # backticks: same key
     ('config.tags contains "G1"', ["a"]),            # list element, case-insensitive
     ('config.tags contains "g20"', ["b"]),           # not a substring match on the JSON text
-    ("layers contains 64", ["a"]),                   # numeric element; [6, 4] doesn't "contain" 64
-    ('layers contains "128"', ["a"]),
-    ('note contains "g2 t"', ["a"]),                 # strings stay substring
+    ("config.layers contains 64", ["a"]),            # numeric element; [6, 4] doesn't "contain" 64
+    ('config.layers contains "128"', ["a"]),
+    ('config.note contains "g2 t"', ["a"]),          # strings stay substring
     ("config.tags exists", ["a", "b", "c"]),
-    ("tags contains real", ["a"]),                   # plain `tags` is still the run's tags
-    ("config.lr = 0.1", ["b"]),                      # a real nested "config.lr" key wins
-    ("lr = 9", ["b"]),
+    ("tags contains real", ["a"]),                   # bare `tags` is always the run's tags
+    ("config.config.lr = 0.1", ["b"]),               # a sub-config named "config"
+    ("config.lr = 9", ["b"]),
 ])
 def test_config_prefix_and_list_contains(listmeta, q, expected):
     assert names(listmeta, q, project="p") == expected
 
 
-def test_suggest_and_order_use_config_prefix(listmeta):
-    items = {i["label"]: i["insert"] for i in listmeta.suggest("p", "")["items"]}
-    assert items["tags"] in ("tags", "config.tags")  # the run field "tags" and the config key both listed
-    cfg_insert = [i["insert"] for i in listmeta.suggest("p", "")["items"] if i["label"] == "tags" and i["kind"] == "config"]
-    assert cfg_insert == ["config.tags"]
-    ids = listmeta.query_ids("p", "", order="config.tags", desc=False)
+def test_suggest_and_order_use_prefixes(listmeta):
+    items = listmeta.suggest("p", "")["items"]
+    by_kind = {(i["kind"], i["label"]): i["insert"] for i in items}
+    assert by_kind[("run field", "tags")] == "tags"
+    assert by_kind[("config", "config.tags")] == "config.tags"
+    assert by_kind[("config", "config.config.lr")] == "config.config.lr"
+    ids = listmeta.query_ids("p", "", order="config.lr", desc=False)
     assert len(ids) == 3

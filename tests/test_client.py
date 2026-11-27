@@ -77,7 +77,7 @@ def test_online_logging(server, monkeypatch):
         run.log({"loss": 1.0 / (i + 1), "train": {"acc": np.float32(i / 1000)}})
     run.log({"eval": 0.5}, step=999)
     run.finish()
-    rs = chronist.runs("model.arch = lstm", project="p", url=server.url)
+    rs = chronist.runs("config.model.arch = lstm", project="p", url=server.url)
     assert len(rs) == 1
     r = rs[0]
     assert r["status"] == "finished" and r["steps"] == 999 and r["tags"] == ["t"]
@@ -89,7 +89,7 @@ def test_online_logging(server, monkeypatch):
     df = rs.history(["loss"], max_points=50)
     assert len(df) <= 50 and df["count"].sum() == 1000
     cfg = rs.config()
-    assert cfg["model.arch"].tolist() == ["lstm"]
+    assert cfg["config.model.arch"].tolist() == ["lstm"]
 
 
 def test_context_manager_crash(server):
@@ -109,7 +109,7 @@ def test_offline_then_sync(server, tmp_path):
     run.finish()
     res = chronist.sync(url=server.url, verbose=False)
     assert res[0]["points"] == 500
-    rs = chronist.runs("a = 1", project="off", url=server.url)
+    rs = chronist.runs("config.a = 1", project="off", url=server.url)
     assert rs[0]["status"] == "finished" and rs[0]["steps"] == 4990
     # uploaded + finished -> local buffer pruned; nothing left to sync
     assert not os.path.exists(run.dir.path)
@@ -198,7 +198,7 @@ def test_local_readback(server):
     for i in range(100):
         run.log({"m": float(i)})
     run.finish()
-    rs = chronist.runs('k = "v"', project="p", data_dir=server.data_dir)
+    rs = chronist.runs('config.k = "v"', project="p", data_dir=server.data_dir)
     assert len(rs) == 1
     df = rs.history(["m"], max_points=10)
     assert df["count"].sum() == 100
@@ -413,10 +413,11 @@ def test_histograms_offline_sync_and_strict(server):
     strict.finish()
 
 
-def test_config_keys_colliding_with_run_columns(server):
-    """Regression (0.1.1): config keys named like run columns broke RunSet.config()."""
+def test_config_columns_are_prefixed(server):
+    """Every config key is config.<key> and every metric metric.<key>, so nothing
+    can collide with run columns (0.1.1 crashed on a config key named "tags")."""
     cfg = {"tags": ["a", "b"], "name": "cfg-name", "status": "cfg-status", "steps": 123, "created": "yesterday",
-           "run_id": "cfg-id", "config.tags": "already-prefixed", "lr": 0.1}
+           "run_id": "cfg-id", "config": {"tags": "nested sub-config"}, "lr": 0.1}
     run = chronist.init(project="p", name="real-name", url=server.url, config=cfg, tags=["t1"], code=None)
     run.log({"loss": 0.5}, step=7)
     run.finish()
@@ -427,8 +428,11 @@ def test_config_keys_colliding_with_run_columns(server):
             assert col("name") == "real-name" and col("status") == "finished" and col("tags") == "t1"
             assert col("steps") == 7 and col("run_id") == run.id
             assert col("config.name") == "cfg-name" and col("config.status") == "cfg-status"
-            assert col("config.steps") == 123
-            assert col("config.created") == "yesterday" and col("config.run_id") == "cfg-id"
-            # a real "config.tags" key keeps its name; the colliding "tags" moves past it
-            assert col("config.tags") == "already-prefixed" and col("config.config.tags") == "['a', 'b']"
-            assert col("lr") == 0.1 and col("last(loss)") == 0.5
+            assert col("config.steps") == 123 and col("config.run_id") == "cfg-id"
+            assert col("config.tags") == "['a', 'b']" and col("config.config.tags") == "nested sub-config"
+            assert col("config.lr") == 0.1 and col("metric.loss") == 0.5
+            assert "lr" not in list(df.keys() if df_kind == "dict" else df.columns)
+    # the column names work as query names
+    for q in ('config.tags contains "a"', 'config.config.tags = "nested sub-config"', "config.lr = 0.1",
+              "metric.loss < 1", 'config.name = "cfg-name"', 'name = "real-name"'):
+        assert len(chronist.runs(q, project="p", url=server.url)) == 1, q
