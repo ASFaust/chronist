@@ -67,3 +67,29 @@ def test_checkout_and_diff(tmp_path, monkeypatch, capsys):
         assert code == 0 and "attached to run" in out
     finally:
         srv.stop()
+
+
+def test_prune_and_gc_cli(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CHRONIST_DIR", str(tmp_path / "client"))
+    monkeypatch.setenv("CHRONIST_KEEP_LOCAL", "1")
+    monkeypatch.delenv("CHRONIST_URL", raising=False)
+    srv = LiveServer(str(tmp_path / "data")).start()
+    try:
+        run = chronist.init(project="p", url=srv.url, code=None)
+        run.log({"x": 1.0})
+        run.finish()
+        code, out = run_cli(["prune", "--dry-run"], capsys)
+        assert code == 0 and "would prune 1 runs" in out and os.path.exists(run.dir.path)
+        code, out = run_cli(["prune", "--url", "http://elsewhere:1"], capsys)
+        assert "pruned 0 runs" in out
+        code, out = run_cli(["prune"], capsys)
+        assert "pruned 1 runs" in out and not os.path.exists(run.dir.path)
+        # gc: direct access refused while the server holds the data dir
+        code, out = run_cli(["gc", "--data", srv.data_dir], capsys)
+        assert code == 1 and "in use" in out
+        code, out = run_cli(["gc", "--url", srv.url], capsys)
+        assert code == 0 and "removed 0 blobs" in out
+    finally:
+        srv.stop()
+    code, out = run_cli(["gc", "--data", str(tmp_path / "data"), "--vacuum"], capsys)
+    assert code == 0 and "full vacuum" in out

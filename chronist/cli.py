@@ -215,6 +215,40 @@ def cmd_code_diff(a):
             print(txt, end="" if txt.endswith("\n") else "\n")
 
 
+def cmd_prune(a):
+    from .client.prune import prune
+    res = prune(a.paths or None, url=a.url, older_than_days=a.older_than, dry_run=a.dry_run)
+    verb = "would prune" if a.dry_run else "pruned"
+    print(f"{verb} {res['pruned']} runs, kept {res['kept']}; {res['blobs']} unreferenced blobs "
+          f"{'would be ' if a.dry_run else ''}removed")
+
+
+def cmd_gc(a):
+    if a.url or os.environ.get("CHRONIST_URL") and not a.data:
+        import httpx
+        url = (a.url or os.environ["CHRONIST_URL"]).rstrip("/")
+        token = a.token or os.environ.get("CHRONIST_TOKEN")
+        h = {"Authorization": f"Bearer {token}"} if token else {}
+        r = httpx.post(f"{url}/api/admin/gc", json={"vacuum": a.vacuum}, headers=h, timeout=3600)
+        if r.status_code >= 400:
+            print(f"gc failed: {r.text}", file=sys.stderr)
+            return 1
+        res = r.json()
+    else:
+        from .server.core import Core, default_data_dir
+        try:
+            core = Core(a.data or default_data_dir())
+        except RuntimeError as e:
+            print(f"{e}\nrun it through the server instead: chronist gc --url <server>", file=sys.stderr)
+            return 1
+        try:
+            res = core.writer.submit(core.op_gc, a.vacuum).result()
+        finally:
+            core.close()
+    print(f"removed {res['blobs_removed']} blobs ({res['blob_bytes_freed'] / 1e6:.1f} MB), "
+          f"{res['vacuum']} vacuum freed {res['db_bytes_freed'] / 1e6:.1f} MB")
+
+
 def main(argv=None):
     from .server.core import default_data_dir
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -256,6 +290,20 @@ def main(argv=None):
     p.add_argument("--label", default=None)
     p.add_argument("--revoke", metavar="TOKEN_OR_ID")
     p.set_defaults(fn=cmd_tokens)
+
+    p = sub.add_parser("prune", help="delete local run buffers that are fully uploaded")
+    p.add_argument("paths", nargs="*", help="CHRONIST_DIR roots or run dirs (default: $CHRONIST_DIR)")
+    p.add_argument("--url", default=None, help="only runs fully uploaded to this server")
+    p.add_argument("--older-than", type=float, default=0, metavar="DAYS")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_prune)
+
+    p = sub.add_parser("gc", help="server: delete unreferenced blobs, vacuum the databases")
+    p.add_argument("--data", default=None, help="data dir (server must not be running)")
+    p.add_argument("--url", default=None, help="run it inside a running server instead")
+    p.add_argument("--token", default=None)
+    p.add_argument("--vacuum", action="store_true", help="full VACUUM (rewrites the files; slow on big data)")
+    p.set_defaults(fn=cmd_gc)
 
     p = sub.add_parser("checkout", help="restore a run's code snapshot into a directory")
     p.add_argument("run", help="run id or uid")

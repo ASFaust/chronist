@@ -53,6 +53,34 @@ def open_data_dir(path: str, readonly: bool = False, metric_store: Optional[str]
     return meta, store, cfg
 
 
+def lock_data_dir(path: str):
+    """Exclusive lock on a data dir; raises if another process holds it."""
+    import fcntl
+    f = open(os.path.join(path, ".lock"), "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.seek(0)
+        who = f.read().strip()
+        f.close()
+        raise RuntimeError(f"{path} is in use by another chronist server{f' (pid {who})' if who else ''}; "
+                           "only one process may write a data dir")
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
+
+
+def _dir_size(path: str) -> int:
+    total = 0
+    for name in os.listdir(path):
+        p = os.path.join(path, name)
+        if os.path.isfile(p):
+            total += os.path.getsize(p)
+    return total
+
+
 # ---------------------------------------------------------------- writer
 class Writer:
     """The only thread that writes to storage. Everything else submits ops."""
@@ -140,6 +168,8 @@ class Core:
     def __init__(self, data_dir: str, metric_store: Optional[str] = None,
                  heartbeat_timeout: float = 180.0, cache_mb: float = 64.0):
         self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
+        os.makedirs(self.data_dir, exist_ok=True)
+        self._lock = lock_data_dir(self.data_dir)  # the server is the only writer, enforced
         self.meta, store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
         self.store = CachingStore(store, max_mb=cache_mb)
         self.blobs = FsBlobStore(os.path.join(self.data_dir, "blobs"))
@@ -155,6 +185,9 @@ class Core:
         self.pool.shutdown(wait=False)
         self.store.close()
         self.meta.close()
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None
 
     # ---- write ops (run on the writer thread) -------------------------
     def _check_run(self, run_id: int) -> str:
@@ -260,6 +293,44 @@ class Core:
             return None
         raw = self.blobs.read(h)
         return None if raw is None else {"hash": h, **json.loads(raw)}
+
+    def op_gc(self, vacuum: bool = False, grace_s: float = 86400.0) -> dict:
+        """Delete blobs no run references (older than ``grace_s``: uploads in
+        flight are not attached yet), then give free pages back to the OS."""
+        from ..client.code import manifest_blobs
+        refs = set()
+        for mh in self.meta.manifests():
+            refs.add(mh)
+            raw = self.blobs.read(mh)
+            if raw is not None:
+                refs.update(manifest_blobs(json.loads(raw)))
+        cutoff = time.time() - grace_s
+        removed = freed = 0
+        if os.path.isdir(self.blobs.path):
+            for sub in os.listdir(self.blobs.path):
+                d = os.path.join(self.blobs.path, sub)
+                if not os.path.isdir(d):
+                    continue
+                for name in os.listdir(d):
+                    p = os.path.join(d, name)
+                    if sub + name in refs:
+                        continue
+                    try:
+                        st = os.stat(p)
+                        if st.st_mtime > cutoff:
+                            continue
+                        os.remove(p)
+                        removed += 1
+                        freed += st.st_size
+                    except FileNotFoundError:
+                        pass
+        before = _dir_size(self.data_dir)
+        self.meta.vacuum(full=vacuum)
+        if hasattr(self.store, "vacuum"):
+            self.store.vacuum(full=vacuum)
+        after = _dir_size(self.data_dir)
+        return {"blobs_removed": removed, "blob_bytes_freed": freed,
+                "db_bytes_freed": max(0, before - after), "vacuum": "full" if vacuum else "incremental"}
 
     def op_mark_crashed(self) -> List[int]:
         ids = self.meta.mark_crashed(self.heartbeat_timeout)

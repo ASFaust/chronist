@@ -1,5 +1,6 @@
 import gzip
 import json
+import json
 import threading
 
 import msgpack
@@ -215,3 +216,58 @@ def test_raw_paging(client, monkeypatch):
     monkeypatch.setattr(rb, "PAGE", 77)
     lines = client.get("/api/export", params={"format": "csv"}).text.strip().splitlines()
     assert len(lines) == 1001
+
+
+def test_data_dir_lock(tmp_path):
+    c1 = Core(str(tmp_path / "d"))
+    with pytest.raises(RuntimeError, match="in use by another chronist server"):
+        Core(str(tmp_path / "d"))
+    c1.close()
+    Core(str(tmp_path / "d")).close()  # free again after close
+
+
+def test_gc_blobs_and_vacuum(tmp_path):
+    import os
+    import time as _t
+
+    from chronist.codec import compress
+    from chronist.blobs import sha256
+    core = Core(str(tmp_path / "d"))
+    try:
+        client = TestClient(create_app(core))
+        files = {n: f"content {n}\n".encode() for n in ("a", "b", "c")}
+        hashes = {n: sha256(v) for n, v in files.items()}
+        env, pk = b"{}", b""
+        for data in list(files.values()) + [env, pk]:
+            client.put(f"/api/blobs/{sha256(data)}", content=compress(data))
+
+        def manifest(names):
+            m = {"version": 1, "root": {}, "skipped": [], "env": sha256(env), "packages": sha256(pk),
+                 "files": [{"path": n, "sha256": hashes[n], "size": 1, "mode": 0o100644} for n in names]}
+            raw = json.dumps(m).encode()
+            client.put(f"/api/blobs/{sha256(raw)}", content=compress(raw))
+            return sha256(raw)
+
+        r1 = mkrun(client, uid="r1")["id"]
+        r2 = mkrun(client, uid="r2")["id"]
+        assert client.post(f"/api/runs/{r1}/code", json={"manifest": manifest(["a", "b"])}).status_code == 200
+        assert client.post(f"/api/runs/{r2}/code", json={"manifest": manifest(["b", "c"])}).status_code == 200
+        orphan = sha256(b"orphan")
+        client.put(f"/api/blobs/{orphan}", content=compress(b"orphan"))
+        # nothing is old enough yet
+        assert core.writer.submit(core.op_gc).result()["blobs_removed"] == 0
+        log(client, r1, {"x": (range(50_000), [1.0] * 50_000)})
+        client.delete(f"/api/runs/{r1}")
+        old = _t.time() - 2 * 86400
+        for root, _, names in os.walk(core.blobs.path):
+            for n in names:
+                os.utime(os.path.join(root, n), (old, old))
+        res = core.writer.submit(core.op_gc, True).result()
+        # gone: orphan, a, r1's manifest; kept: b, c, env, packages, r2's manifest
+        assert res["blobs_removed"] == 3
+        assert core.blobs.has(hashes["b"]) and core.blobs.has(hashes["c"]) and not core.blobs.has(hashes["a"])
+        assert res["db_bytes_freed"] > 0
+        r = client.post("/api/admin/gc", json={})
+        assert r.status_code == 200 and r.json()["blobs_removed"] == 0
+    finally:
+        core.close()

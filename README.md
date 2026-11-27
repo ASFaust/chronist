@@ -41,6 +41,15 @@ run.finish()                                                     # or: with chro
   marks the run `crashed`; a run that stops heartbeating is marked `crashed` by
   the server (default after 180 s).
 - Resume: `chronist.init(resume="<uid>")` re-attaches and continues at the next step.
+  Resuming from an earlier checkpoint:
+  `chronist.init(resume="<uid>", rewind=5000)` discards everything the run
+  logged at step ≥ 5000 and continues there. Without `rewind`, values at
+  already-logged steps are ignored (first write wins), and the client warns
+  the first time you log one.
+- Cleanup: once a finished run is fully on the server (points, finish record,
+  code), its local buffer and now-unneeded local blobs are deleted, after
+  `finish()` or `chronist sync`. Set `CHRONIST_KEEP_LOCAL=1` to keep them;
+  `chronist prune` removes older ones.
 
 ## Code snapshots
 
@@ -173,7 +182,10 @@ Returns pandas by default (`dataframe="polars"` or `"dict"` for the others).
 It reads from `CHRONIST_URL` if set, otherwise directly from the local data
 dir (`~/.chronist/data`, read-only, safe while a server is running). Pass
 `url=` or `data_dir=` to choose. Bulk export over HTTP:
-`GET /api/export?project=..&q=..&format=parquet|arrow|csv`.
+`GET /api/export?project=..&q=..&format=parquet|arrow|csv` (streamed in
+100k-point pages; server memory stays flat regardless of size). Raw reads
+over HTTP are paged (≤ 250k points per response, `next_start` for the next
+page); read-back handles the paging for you.
 
 ## CLI
 
@@ -186,6 +198,12 @@ dir (`~/.chronist/data`, read-only, safe while a server is running). Pass
 | `chronist checkout <run> [dir] [--force]` | restore a run's code snapshot |
 | `chronist code diff <a> <b> [--stat]` | code + config diff of two runs |
 | `chronist snapshot [--code C] [--run ID]` | standalone snapshot (optionally attach to a run) |
+| `chronist prune [PATH...] [--url U] [--older-than DAYS] [--dry-run]` | delete local buffers already on a server |
+| `chronist gc [--url U \| --data DIR] [--vacuum]` | server: drop unreferenced blobs, vacuum (also runs daily) |
+
+The server takes an exclusive lock on its data dir, so a second server, or
+`chronist gc --data` while a server is running, refuses to start. Use
+`chronist gc --url` to run GC inside the server.
 
 ## Architecture
 

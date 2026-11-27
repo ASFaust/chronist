@@ -62,6 +62,7 @@ class SqliteRowStore:
         if not readonly:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             con = connect(path)
+            con.execute("PRAGMA auto_vacuum=INCREMENTAL")  # only effective on a new file
             con.executescript(SCHEMA)
             con.close()
         self._local = threading.local()
@@ -176,6 +177,13 @@ class SqliteRowStore:
                 if own_tx:
                     con.execute("ROLLBACK")
                 raise
+
+    def vacuum(self, full: bool = False) -> None:
+        """Return free pages to the OS: incremental (cheap) or a full VACUUM."""
+        with self._wlock:
+            con = self._writer()
+            con.execute("VACUUM" if full else "PRAGMA incremental_vacuum")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def flush(self) -> None:
         pass

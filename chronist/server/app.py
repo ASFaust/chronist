@@ -161,7 +161,8 @@ def strip_code(run: dict) -> dict:
 
 
 # ---------------------------------------------------------------- app
-def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> Starlette:
+def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
+               gc_interval: float = 86400.0) -> Starlette:
     """tokens: a TokenStore, or {token: role | entry} for an in-memory store."""
     if not isinstance(tokens, TokenStore):
         tokens = token_store_from_dict(tokens)
@@ -490,6 +491,12 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
         return Response(data, media_type="text/plain; charset=utf-8",
                         headers={"Cache-Control": "private, max-age=86400"})
 
+    async def admin_gc(request):
+        if not is_writer(request):
+            return JSONResponse({"error": "needs a write token"}, 403)
+        body = await read_body(request)
+        return respond(request, await submit(core.op_gc, bool(body.get("vacuum", False))))
+
     async def health(request):
         return JSONResponse({"ok": True, "auth": tokens.enabled})
 
@@ -534,6 +541,7 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
     routes = [
         Route("/api/health", handle(health)),
         Route("/api/whoami", handle(whoami)),
+        Route("/api/admin/gc", handle(admin_gc), methods=["POST"]),
         Route("/api/tokens", handle(list_tokens), methods=["GET"]),
         Route("/api/tokens", handle(create_token), methods=["POST"]),
         Route("/api/tokens/{id}", handle(revoke_token), methods=["DELETE"]),
@@ -573,13 +581,24 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
             except Exception:  # pragma: no cover
                 log.exception("crash check failed")
 
+    async def daily_gc():
+        await asyncio.sleep(3600)
+        while True:
+            try:
+                res = await submit(core.op_gc)
+                log.info("gc: %s", res)
+            except Exception:  # pragma: no cover
+                log.exception("gc failed")
+            await asyncio.sleep(gc_interval)
+
     @contextlib.asynccontextmanager
     async def lifespan(app):
-        task = asyncio.create_task(crash_checker())
+        tasks = [asyncio.create_task(crash_checker()), asyncio.create_task(daily_gc())]
         try:
             yield
         finally:
-            task.cancel()
+            for t in tasks:
+                t.cancel()
 
     return Starlette(routes=routes, middleware=[Middleware(AuthMiddleware, tokens=tokens)],
                      lifespan=lifespan)

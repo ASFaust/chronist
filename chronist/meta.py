@@ -153,6 +153,7 @@ class MetadataStore:
         if not readonly:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             self._w = connect(path)
+            self._w.execute("PRAGMA auto_vacuum=INCREMENTAL")  # only effective on a new file
             self._w.executescript(SCHEMA)
         else:
             self._w = None
@@ -185,6 +186,13 @@ class MetadataStore:
         except BaseException:
             con.execute("ROLLBACK")
             raise
+
+    def vacuum(self, full: bool = False) -> None:
+        self.w.execute("VACUUM" if full else "PRAGMA incremental_vacuum")
+        self.w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def manifests(self) -> List[str]:
+        return [r[0] for r in self.w.execute("SELECT DISTINCT manifest FROM run_code")]
 
     def close(self):
         if self._w is not None:

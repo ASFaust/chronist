@@ -95,6 +95,10 @@ class CachingStore:
     def flush(self) -> None:
         self.inner.flush()
 
+    def vacuum(self, full: bool = False) -> None:
+        if hasattr(self.inner, "vacuum"):
+            self.inner.vacuum(full)
+
     def maintain(self) -> None:
         self.inner.maintain()
 

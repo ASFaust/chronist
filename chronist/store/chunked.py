@@ -201,6 +201,7 @@ class ChunkedStore:
         if not readonly:
             os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
             con = connect(path)
+            con.execute("PRAGMA auto_vacuum=INCREMENTAL")  # only effective on a new file
             con.executescript(SCHEMA)
             con.close()
         self._local = threading.local()
@@ -506,6 +507,13 @@ class ChunkedStore:
                             "WHERE run_id=? AND key_id=?", (last0[0], min(firsts), last_step, last_value, run_id, kid))
                 self._hot_n.pop((run_id, kid), None)
         self._tx(_del)
+
+    def vacuum(self, full: bool = False) -> None:
+        """Return free pages to the OS: incremental (cheap) or a full VACUUM."""
+        with self._wlock:
+            con = self._writer()
+            con.execute("VACUUM" if full else "PRAGMA incremental_vacuum")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def flush(self) -> None:
         pass
