@@ -51,6 +51,84 @@ run.finish()                                                     # or: with chro
   `finish()` or `chronist sync`. Set `CHRONIST_KEEP_LOCAL=1` to keep them;
   `chronist prune` removes older ones.
 
+## Histograms
+
+```python
+run.log({"weights/layer1": layer.weight}, step=t)               # >1 element -> histogram (64 bins)
+run.log({"grad/l1": chronist.Histogram(g, bins=128)}, step=t)  # explicit
+run.log({"returns": chronist.Histogram(r, raw=True)}, step=t)  # exact values (<= 10k)
+run.configure_histograms("weights/*", range=(-1, 1))           # fixed range + under/overflow
+chronist.init(histogram_bins=32, auto_histograms=False)         # run default / strict mode
+```
+
+- Each record holds the exact stats over finite values (count, mean, std,
+  min, max), NaN/±Inf counts, and bin counts. The bin range is adaptive (this
+  step's min/max) by default, or a fixed range. Torch tensors are reduced on
+  their own device; only the stats and bins come back to the host.
+- Bins: `Histogram(..., bins=)` > the last matching `configure_histograms`
+  pattern > `init(histogram_bins=)` > 64 (max 1024).
+- About 300 B per record: log them every N steps (`run.log(..., every=100)`).
+- Views: a heatmap (step × value) with a robust value range (0.5–99.5%
+  quantiles, so heavy tails don't flatten it; "full range" toggles min–max),
+  quantile bands, stats lines, and a single step with a slider. Over many
+  steps the server subsamples whole records evenly (never merges them).
+- Read-back: `runs.histograms("grad/l1", max_steps=200)` (DataFrame with
+  `edges`/`counts` arrays), `run.histogram("grad/l1", step=5000)` (nearest step
+  at or before), `run.histograms(key).to_dense(rows=128)`.
+- A rewind also discards histogram records.
+
+## Files (checkpoints, plots, outputs)
+
+```python
+run.save_file("checkpoints/model.pt", step=t, aliases=["best"], metadata={"val_loss": 0.21})
+run.save_file("plots/curve.png", kind="plot")
+run.save_file("ckpt.pt", step=t, move=True)              # or link=True (hard link; never modify in place)
+run.save_object(model.state_dict(), name="model", step=t) # torch.save if torch is loaded, else pickle
+run.configure_files("model", keep_last=3, keep_every=100_000)
+
+r = chronist.run(42)
+r.files()                                           # name, version_id, step, kind, size, aliases, metadata
+r.download("model", alias="best", dest="./ckpt/")   # default alias: latest
+r.load_object("model", step=200_000)
+```
+```
+chronist pull <run> <name> [--alias A | --step N | --version V] [--dest DIR]
+```
+
+- Content is captured when you call `save_file`, so overwriting `model.pt`
+  afterwards is fine. A background thread splits it into 8 MiB
+  content-addressed chunks (compressed only if that saves ≥ 5%). Identical
+  files and chunks are stored once.
+- Uploads only send chunks the server lacks, are resumable, and run after
+  metrics in each upload round, so checkpoints never delay metrics.
+  `CHRONIST_UPLOAD_MBPS` caps the bandwidth. Offline runs upload with
+  `chronist sync`.
+- `latest` moves automatically; other aliases move when reassigned (UI or
+  `PATCH .../files/<name>/aliases`). Retention keeps the newest `keep_last`
+  versions plus the first in each `keep_every`-step window, and aliased
+  versions are always kept. Dropped versions' chunks are freed by GC.
+- Server limits: `--max-blob-storage 50GB` (warns at 80%; at 100% new file
+  uploads are refused, but metrics keep working), `--max-file-size` (default
+  20 GB), `--blob-dir` to put blobs on another volume.
+- Downloads verify sha256 and cache chunks in `~/.cache/chronist`
+  (`CHRONIST_CACHE`), so repeated or interrupted downloads only fetch what's
+  missing. `GET /api/files/<version>/download` serves the whole file with
+  HTTP Range support. Read-only share tokens can download files.
+- Reverse proxies: chunk uploads are ≤ 8 MiB plus a few bytes; with nginx, set
+  `client_max_body_size 16m` (Caddy has no default limit).
+- The UI's run drawer has a **Files** tab: versions grouped by name, aliases,
+  metadata, download, and for owners set/move alias and delete.
+
+Differences from the spec in `docs/HISTOGRAMS_FILES.md`:
+- Blob GC is the server's mark-and-sweep (daily, `chronist gc`) over code and
+  file manifests. It isn't in `MetricStore.maintain()`, and nothing deletes
+  blobs directly.
+- Quota is checked when a file upload starts (`blobs/missing` with
+  `purpose: "file"`), not on every blob PUT, because blob uploads are shared
+  with code snapshots.
+- File chunks are served via `/api/files/<version>/chunk/<i>`, not the blob
+  endpoint, so read-only share links work without code access.
+
 ## Code snapshots
 
 Every run records exactly which code ran, including uncommitted and untracked
