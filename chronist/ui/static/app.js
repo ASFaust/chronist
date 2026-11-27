@@ -199,7 +199,9 @@ for step in range(1000):
 run.finish()</pre>
       <p class="muted">With <code>chronist ui</code>, offline runs in <code>~/.chronist</code> show up automatically.
       Otherwise set <code>CHRONIST_URL</code> or run <code>chronist sync</code>.</p>
-      ${auth && html`<${TokenModal} status=${auth} onDone=${() => { setAuth(null); loadProjects(); }} />`}
+      ${me.auth && me.role === "write" && html`<p><a href="#" class="muted small" onClick=${async (e) => {
+          e.preventDefault(); try { await api.logout(); } catch {} setToken(null); location.reload(); }}>Log out</a></p>`}
+      ${auth && html`<${TokenModal} status=${auth} onDone=${() => { setAuth(null); loadProjects(); loadMe(); }} />`}
     </div>`;
   }
 
@@ -223,6 +225,8 @@ run.finish()</pre>
             </span>`}
           <a class="btn small ghost" href=${api.exportUrl(project, q, [], "parquet")} title="Download matching runs as Parquet">Export</a>
           ${me.role === "write" && html`<button class="btn small" onClick=${() => setShare(true)} title="Create a read-only link to this view">Share</button>`}
+          ${me.auth && me.role === "write" && html`<button class="btn small ghost" title="Log out of this browser"
+            onClick=${async () => { try { await api.logout(); } catch {} setToken(null); location.reload(); }}>Log out</button>`}
           ${me.auth && me.role === "read" && html`<span class="chip" title=${me.code ? "Read-only link, code included" : "Read-only link, code not shared"}>read-only${me.code ? " · code" : ""}</span>`}
           <select class="theme" value=${theme} onChange=${(e) => setThemeChoice(e.target.value)} title="Theme">
             <option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option>
@@ -262,15 +266,45 @@ run.finish()</pre>
 }
 
 function TokenModal({ status, onDone }) {
+  // 401: log in with the server password (or paste an access token); 403: read-only token
+  const [mode, setMode] = useState(status === 403 ? "token" : "password");
+  const [pw, setPw] = useState("");
   const [t, setT] = useState(getToken() || "");
-  return html`<${Modal} title=${status === 403 ? "This token is read-only" : "Access token"}>
-    <p class="muted">${status === 403 ? "Changes need a write token." : "This server requires a token."}</p>
-    <input class="input" type="password" value=${t} onInput=${(e) => setT(e.target.value)} autofocus
-      onKeyDown=${(e) => { if (e.key === "Enter") { setToken(t); onDone(); } }} />
-    <div class="modal-actions">
-      ${status === 403 && html`<button class="btn ghost" onClick=${onDone}>Keep read-only</button>`}
-      <button class="btn" onClick=${() => { setToken(t); onDone(); }}>Save</button>
-    </div>
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  async function submit() {
+    setErr(null);
+    if (mode === "token") { setToken(t); onDone(); return; }
+    setBusy(true);
+    try { setToken(await api.login(pw)); onDone(); }
+    catch (e) { setErr(e.message); setPw(""); }
+    finally { setBusy(false); }
+  }
+  if (status === 403) {
+    return html`<${Modal} title="This link is read-only">
+      <p class="muted">Changes need the server password.</p>
+      <div class="modal-actions">
+        <button class="btn ghost" onClick=${onDone}>Keep read-only</button>
+        <button class="btn" onClick=${() => { setToken(null); location.reload(); }}>Log in instead</button>
+      </div>
+    <//>`;
+  }
+  return html`<${Modal} title=${mode === "password" ? "Log in" : "Access token"}>
+    <form onSubmit=${(e) => { e.preventDefault(); submit(); }}>
+      ${mode === "password"
+        ? html`<p class="muted">Enter the password of this chronist server.</p>
+               <input class="input" type="password" autocomplete="current-password" value=${pw}
+                 onInput=${(e) => setPw(e.target.value)} autofocus />`
+        : html`<p class="muted">Paste an access token.</p>
+               <input class="input mono" value=${t} onInput=${(e) => setT(e.target.value)} autofocus />`}
+      ${err && html`<div class="query-error">${err}</div>`}
+      <div class="modal-actions">
+        <a href="#" class="muted small" onClick=${(e) => { e.preventDefault(); setErr(null); setMode(mode === "password" ? "token" : "password"); }}>
+          ${mode === "password" ? "Use an access token" : "Use the password"}</a>
+        <span class="spacer"></span>
+        <button class="btn" type="submit" disabled=${busy}>${busy ? "…" : mode === "password" ? "Log in" : "Save"}</button>
+      </div>
+    </form>
   <//>`;
 }
 

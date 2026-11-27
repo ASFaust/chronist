@@ -215,7 +215,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); margi
 .modal-back { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: var(--surface); border-radius: 10px; padding: 18px; width: min(380px, calc(100vw - 32px)); box-shadow: var(--shadow); }
 .modal h3 { margin: 0 0 8px; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; }
 .welcome { max-width: 620px; margin: 12vh auto; padding: 0 16px; }
 .welcome h1 { font-size: 28px; }
 .code { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font: 12.5px var(--mono); overflow-x: auto; }

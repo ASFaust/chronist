@@ -81,6 +81,15 @@ export const api = {
   del: (id) => request("DELETE", `/api/runs/${id}`),
   code: (id) => request("GET", `/api/runs/${id}/code`),
   whoami: () => request("GET", "/api/whoami"),
+  login: async (password) => {
+    const r = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ password, label: "browser: " + navigator.userAgent.slice(0, 40) }) });
+    let d = {};
+    try { d = await r.json(); } catch {}
+    if (!r.ok) throw new ApiError(d.error || r.statusText, r.status);
+    return d.token;
+  },
+  logout: () => request("POST", "/api/logout", {}),
   tokens: () => request("GET", "/api/tokens"),
   createToken: (body) => request("POST", "/api/tokens", body),
   revokeToken: (id) => request("DELETE", `/api/tokens/${id}`),

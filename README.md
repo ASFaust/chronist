@@ -34,7 +34,8 @@ run.finish()                                                     # or: with chro
   is down, data stays buffered and the uploader retries with backoff.
 - No server configured → offline: only local files. Upload later with
   `chronist sync` (same code path as the live uploader).
-- Config: `CHRONIST_URL`, `CHRONIST_TOKEN`, `CHRONIST_DIR`, `CHRONIST_PROJECT`.
+- Config: `CHRONIST_URL`, `CHRONIST_DIR`, `CHRONIST_PROJECT` (and optionally
+  `CHRONIST_TOKEN`; normally the saved login is used, see "Viewing").
 - Captured automatically: git commit/branch/remote, dirty flag + diff hash
   (the diff itself is kept in the run dir as `diff.patch`), command line, cwd,
   hostname, Python version, start time.
@@ -185,8 +186,15 @@ so locally you don't need `CHRONIST_URL` at all.
 **Remote:** on the VPS:
 
 ```
-chronist serve --host 127.0.0.1 --port 7070 --token <write-token> --read-token <read-token>
+chronist serve --host 127.0.0.1 --port 7070
 ```
+
+On the first start it asks you to choose a password (stored only as a scrypt
+hash in `<data>/auth.json`). Without a terminal (systemd, Docker), set it
+beforehand with `chronist passwd --data <dir>`, or pass `CHRONIST_PASSWORD`
+for the first start. `chronist passwd [--revoke-sessions]` changes it later,
+and a running server picks the change up immediately. `--no-auth` turns
+protection off.
 
 Put Caddy in front for TLS (`Caddyfile`):
 
@@ -196,11 +204,18 @@ chronist.example.org {
 }
 ```
 
-Without `--token` on a non-localhost bind, the server generates a write
-token, stores it in `<data>/tokens.json` and prints it. A localhost-bound
-server without tokens is reachable through `ssh -L 7070:localhost:7070 vps`.
+**Logging in:** the browser asks for the password. On machines that log
+runs, set `CHRONIST_URL=https://chronist.example.org`. The first
+`chronist.init()` (or `chronist.runs()`, `chronist sync`, ...) in a terminal
+or notebook asks for the password once and saves a token in
+`~/.config/chronist/credentials.json`. Clients only ever keep that
+per-machine token, never the password. For cluster jobs that can't prompt,
+run `chronist login https://chronist.example.org` once on the login node; jobs
+sharing that home directory find the token. `chronist logout` revokes it.
+Repeated wrong passwords are throttled. Tokens still work directly too
+(`CHRONIST_TOKEN`, `--token`), e.g. for CI.
 
-**Sharing:** the UI's **Share** button (shown to write-token holders) creates
+**Sharing:** the UI's **Share** button (shown when you're logged in) creates
 a read-only link to the current view. **Share code as well** is off by
 default. Without it, the link's token can't read code snapshots (manifests,
 files, blobs, snapshot metadata) through the UI, the API or Python. Links are
@@ -208,8 +223,6 @@ listed and revocable in the same dialog and take effect immediately. CLI
 equivalent: `chronist tokens --new read [--code] [--label L]`, `chronist tokens`,
 `chronist tokens --revoke <id>`. A server in local no-auth mode can't share,
 because anyone who can reach it sees everything.
-
-Clients: `export CHRONIST_URL=https://chronist.example.org CHRONIST_TOKEN=<write-token>`.
 
 ### UI
 
@@ -271,7 +284,9 @@ page); read-back handles the paging for you.
 | command | |
 |---|---|
 | `chronist ui [--data DIR] [--port N] [--no-browser] [--no-watch]` | local server + UI, no auth |
-| `chronist serve [--host H] [--port N] [--token T] [--read-token R] [--no-auth]` | server for remote use |
+| `chronist serve [--host H] [--port N] [--no-auth]` | server for remote use (password; asks on first start) |
+| `chronist passwd [--data DIR] [--revoke-sessions]` | set or change the server password |
+| `chronist login [URL]` / `chronist logout [URL]` | save / revoke this machine's token for a server |
 | `chronist sync [PATH...] [--url U] [--token T]` | upload offline/backlogged runs |
 | `chronist tokens [--new write\|read] [--code] [--label L] [--revoke ID]` | manage server/share tokens |
 | `chronist checkout <run> [dir] [--force]` | restore a run's code snapshot |

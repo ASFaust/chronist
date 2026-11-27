@@ -321,7 +321,8 @@ def _raise(r):
 def _open_source(url=None, token=None, data_dir=None):
     url = url or (None if data_dir else os.environ.get("CHRONIST_URL"))
     if url:
-        return _RemoteSource(url, token or os.environ.get("CHRONIST_TOKEN"))
+        from .client.auth import resolve_token
+        return _RemoteSource(url, resolve_token(url, token))
     from .server.core import default_data_dir
     return _LocalSource(data_dir or default_data_dir())
 

@@ -383,13 +383,16 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
         makes non-scalar values raise TypeError instead of becoming histograms.
     rewind: with resume, discard everything the run logged at step >= rewind
         (e.g. resuming from an earlier checkpoint); logging continues there.
-    url/token: server; default $CHRONIST_URL / $CHRONIST_TOKEN. No URL (or
+    url/token: server; default $CHRONIST_URL. Token: argument, $CHRONIST_TOKEN, the
+        login saved by `chronist login`, or (interactively) a password prompt. No URL (or
         offline=True) -> only local files; upload later with `chronist sync`.
     dir: local buffer root; default $CHRONIST_DIR or ~/.chronist.
     """
     global _active
     url = None if offline else (url or os.environ.get("CHRONIST_URL") or None)
-    token = token or os.environ.get("CHRONIST_TOKEN") or None
+    if url:  # explicit > $CHRONIST_TOKEN > saved login > password prompt (interactive)
+        from .auth import resolve_token
+        token = resolve_token(url, token)
     base = os.path.abspath(os.path.expanduser(dir or default_dir()))  # absolute once; chdir-proof
     root = os.path.join(base, "runs")
     project = project or os.environ.get("CHRONIST_PROJECT") or "default"

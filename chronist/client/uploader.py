@@ -49,6 +49,9 @@ class Uploader:
             r = self.http.post(path, json=body)
         if r.status_code == 404 and path != "/api/runs":
             raise ServerGone(r.text)
+        if r.status_code == 401:
+            raise PermissionError(f"{self.url} rejected the login (no or revoked token); "
+                                  f"run: chronist login {self.url}")
         r.raise_for_status()
         self.last_contact = time.time()
         return r.json()

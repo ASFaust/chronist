@@ -22,15 +22,16 @@ def free_port():
 
 
 class LiveServer:
-    def __init__(self, data_dir, port=None, tokens=None):
+    def __init__(self, data_dir, port=None, tokens=None, password=None):
         self.data_dir = data_dir
         self.port = port or free_port()
         self.tokens = tokens
+        self.password = password
         self.url = f"http://127.0.0.1:{self.port}"
 
     def start(self):
         self.core = Core(self.data_dir)
-        cfg = uvicorn.Config(create_app(self.core, tokens=self.tokens), host="127.0.0.1",
+        cfg = uvicorn.Config(create_app(self.core, tokens=self.tokens, password=self.password), host="127.0.0.1",
                              port=self.port, log_level="error")
         self.server = uvicorn.Server(cfg)
         self.thread = threading.Thread(target=self.server.run, daemon=True)

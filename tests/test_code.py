@@ -431,7 +431,7 @@ def test_share_tokens_hide_code(cdir, tmp_path, monkeypatch):
         assert httpx.post(f"{srv.url}/api/tokens", headers=h(with_code), json={}).status_code == 403
         assert httpx.get(f"{srv.url}/api/tokens", headers=h(with_code)).status_code == 403
         assert httpx.post(f"{srv.url}/api/blobs/missing", headers=h(with_code), json={"hashes": []}).status_code == 403
-        assert httpx.get(f"{srv.url}/api/whoami", headers=h(no_code)).json() == {"auth": True, "role": "read", "code": False}
+        assert httpx.get(f"{srv.url}/api/whoami", headers=h(no_code)).json() == {"auth": True, "role": "read", "code": False, "password_login": False}
         # python read-back with a no-code token: run works, code access says why it fails
         ref = chronist.run(run.id, url=srv.url, token=no_code)
         assert ref.name == run._info.get("name") or ref.name
@@ -451,7 +451,7 @@ def test_cannot_create_share_tokens_without_auth(server):
     import httpx
     r = httpx.post(f"{server.url}/api/tokens", json={"code": False})
     assert r.status_code == 400 and "without authentication" in r.json()["error"]
-    assert httpx.get(f"{server.url}/api/whoami").json() == {"auth": False, "role": "write", "code": True}
+    assert httpx.get(f"{server.url}/api/whoami").json() == {"auth": False, "role": "write", "code": True, "password_login": False}
 
 
 def test_legacy_tokens_file(tmp_path):

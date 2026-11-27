@@ -78,7 +78,8 @@ def sync(paths: Optional[Iterable[str]] = None, url: Optional[str] = None, token
     url = url or os.environ.get("CHRONIST_URL")
     if not url:
         raise SystemExit("no server: pass --url or set CHRONIST_URL")
-    token = token or os.environ.get("CHRONIST_TOKEN")
+    from .auth import resolve_token
+    token = resolve_token(url, token)
     results = []
     for rd in find_runs(paths or [default_dir()]):
         try:

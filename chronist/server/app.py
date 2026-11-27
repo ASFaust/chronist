@@ -21,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 
 from ..blobs import valid_hash
 from ..query import QueryError
+from .auth import LoginThrottle, PasswordFile
 from .tokens import TokenStore, from_dict as token_store_from_dict
 from ..store import Buckets
 from .core import Core, QuotaError, decode_hists, decode_points
@@ -115,15 +116,21 @@ class AuthMiddleware:
     -> auth off (local mode). The store is consulted per request, so tokens
     created or revoked at runtime take effect immediately."""
 
-    def __init__(self, app, tokens: TokenStore):
+    PUBLIC = {"/api/login"}
+
+    def __init__(self, app, tokens: TokenStore, auth_on):
         self.app = app
         self.tokens = tokens
+        self.auth_on = auth_on
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not scope["path"].startswith("/api/"):
             return await self.app(scope, receive, send)
         state = scope.setdefault("state", {})
-        if not self.tokens.enabled:
+        if scope["path"] in self.PUBLIC:
+            state.update(role=None, code=False, auth=self.auth_on())
+            return await self.app(scope, receive, send)
+        if not self.auth_on():
             state.update(role="write", code=True, auth=False)
             return await self.app(scope, receive, send)
         req = Request(scope)
@@ -162,10 +169,19 @@ def strip_code(run: dict) -> dict:
 
 # ---------------------------------------------------------------- app
 def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
-               gc_interval: float = 86400.0) -> Starlette:
-    """tokens: a TokenStore, or {token: role | entry} for an in-memory store."""
+               gc_interval: float = 86400.0, password: Optional["PasswordFile"] = None,
+               require_auth: Optional[bool] = None) -> Starlette:
+    """tokens: a TokenStore, or {token: role | entry} for an in-memory store.
+    password: single-user password login (PasswordFile).
+    require_auth: force auth on/off; default: on when tokens or a password exist."""
     if not isinstance(tokens, TokenStore):
         tokens = token_store_from_dict(tokens)
+    throttle = LoginThrottle()
+
+    def auth_on() -> bool:
+        if require_auth is not None:
+            return require_auth
+        return tokens.enabled or (password is not None and password.is_set())
 
     def code_forbidden():
         return JSONResponse({"error": CODE_HIDDEN}, 403)
@@ -633,20 +649,58 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
                                  media_type="application/octet-stream", headers=headers)
 
     async def health(request):
-        return JSONResponse({"ok": True, "auth": tokens.enabled})
+        return JSONResponse({"ok": True, "auth": auth_on()})
 
     async def whoami(request):
         st = request.scope.get("state", {})
-        return JSONResponse({"auth": tokens.enabled, "role": st.get("role"), "code": st.get("code")})
+        return JSONResponse({"auth": auth_on(), "role": st.get("role"), "code": st.get("code"),
+                             "password_login": password is not None and password.is_set()})
+
+    # ---- password login ----
+    def client_key(request) -> str:
+        fwd = request.headers.get("x-forwarded-for")
+        return (fwd.split(",")[0].strip() if fwd else None) or (request.client.host if request.client else "?")
+
+    async def login(request):
+        body = await read_body(request)
+        if password is None or not password.is_set():
+            raise ApiError(400, "password login is not set up on this server (chronist passwd)")
+        who = client_key(request)
+        wait = throttle.wait_for(who)
+        if wait > 0:
+            return JSONResponse({"error": f"too many failed attempts; try again in {int(wait) + 1}s",
+                                 "retry_after": int(wait) + 1}, 429, headers={"Retry-After": str(int(wait) + 1)})
+        pw = body.get("password")
+        if not isinstance(pw, str) or not pw:
+            raise ApiError(400, "password required")
+        ok = await asyncio.get_running_loop().run_in_executor(core.pool, password.verify, pw)
+        if not ok:
+            throttle.failed(who)
+            await asyncio.sleep(0.5)
+            return JSONResponse({"error": "wrong password"}, 401)
+        throttle.succeeded(who)
+        label = str(body.get("label") or request.headers.get("user-agent", "")[:60] or "login")[:100]
+        tok = tokens.create("write", code=True, label=f"login: {label} ({who})", login=True)
+        return JSONResponse({"token": tok})
+
+    async def logout(request):
+        """Revoke the token this request authenticated with (login tokens only)."""
+        auth = request.headers.get("authorization", "")
+        tok = auth[7:].strip() if auth.lower().startswith("bearer ") else request.query_params.get("token")
+        entry = tokens.lookup(tok)
+        if entry is None or not entry.get("login"):
+            return JSONResponse({"error": "not a login session"}, 400)
+        tokens.revoke(tok)
+        return JSONResponse({"ok": True})
 
     # ---- share tokens (write tokens only) ----
     async def list_tokens(request):
         if not is_writer(request):
             return JSONResponse({"error": "needs a write token"}, 403)
-        return JSONResponse({"auth": tokens.enabled, "tokens": [t for t in tokens.list() if t["role"] == "read"]})
+        return JSONResponse({"auth": auth_on(), "tokens": [t for t in tokens.list() if t["role"] == "read"]})
 
     async def create_token(request):
-        if not tokens.enabled:
+        if not auth_on():
             raise ApiError(400, "this server runs without authentication (local mode); start it with "
                                 "`chronist serve` and tokens to share views")
         if not is_writer(request):
@@ -676,6 +730,8 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
     routes = [
         Route("/api/health", handle(health)),
         Route("/api/whoami", handle(whoami)),
+        Route("/api/login", handle(login), methods=["POST"]),
+        Route("/api/logout", handle(logout), methods=["POST"]),
         Route("/api/admin/gc", handle(admin_gc), methods=["POST"]),
         Route("/api/tokens", handle(list_tokens), methods=["GET"]),
         Route("/api/tokens", handle(create_token), methods=["POST"]),
@@ -744,5 +800,5 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
             for t in tasks:
                 t.cancel()
 
-    return Starlette(routes=routes, middleware=[Middleware(AuthMiddleware, tokens=tokens)],
+    return Starlette(routes=routes, middleware=[Middleware(AuthMiddleware, tokens=tokens, auth_on=auth_on)],
                      lifespan=lifespan)
