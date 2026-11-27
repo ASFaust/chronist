@@ -8,10 +8,14 @@ from chronist.store import BACKENDS, Series, open_store
 from chronist.store.cache import CachingStore
 
 
-@pytest.fixture(params=sorted(BACKENDS) + [f"{b}+cache" for b in sorted(BACKENDS)])
+@pytest.fixture(params=sorted(BACKENDS) + [f"{b}+cache" for b in sorted(BACKENDS)] + ["chunked-tiny"])
 def store(request, tmp_path):
     kind, _, cached = request.param.partition("+")
-    s = open_store(kind, str(tmp_path / "metrics.db"))
+    if kind == "chunked-tiny":  # tiny chunks: every test exercises sealing, pyramid, late merges
+        from chronist.store.chunked import ChunkedStore
+        s = ChunkedStore(str(tmp_path / "metrics.db"), chunk=8)
+    else:
+        s = open_store(kind, str(tmp_path / "metrics.db"))
     if cached:
         s = CachingStore(s)
     yield s

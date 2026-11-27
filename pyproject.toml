@@ -20,7 +20,8 @@ dependencies = [
 pandas = ["pandas>=1.5"]
 polars = ["polars>=0.20"]
 export = ["pyarrow>=12"]
-dev = ["pytest", "pandas", "polars", "pyarrow"]
+dev = ["pytest", "pytest-xdist", "pandas", "polars", "pyarrow", "zstandard"]
+chunked = ["zstandard"]
 
 [project.scripts]
 chronist = "chronist.cli:main"
