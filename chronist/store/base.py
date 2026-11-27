@@ -10,6 +10,13 @@ bucket boundaries stay stable across zooms and are aligned across runs, which
 is what grouping/aggregation across runs relies on. ``Buckets.step`` is the
 step of the last point inside each bucket (so a raw read, ``count == 1``,
 reports the point's own step).
+
+Bucket width: computed with ``bucket_width(lo, hi, max_points)`` where ``lo``
+is ``start`` if given, else the key's first step, and ``hi`` is ``end`` if
+given, else the key's last step + 1. So with explicit ``start`` and ``end``
+the width depends only on the request, and reads of different runs/keys with
+the same request share one grid. Backends with fixed pyramid levels may pick
+a different (coarser-aligned) width but must report it in ``Buckets.width``.
 """
 from __future__ import annotations
 

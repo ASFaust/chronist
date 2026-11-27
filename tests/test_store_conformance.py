@@ -161,3 +161,13 @@ def test_readonly_reader_sees_commits(store, tmp_path):
             reader.write(1, pts("x", [100]))
     finally:
         reader.close()
+
+
+def test_explicit_range_shares_grid(store):
+    store.write(1, pts("a", range(0, 50_000)))
+    store.write(1, pts("b", range(30_000, 100_000)))
+    store.write(2, pts("a", range(0, 7_000)))
+    widths = {store.read(r, k, 0, 100_000, max_points=500).width for r, k in [(1, "a"), (1, "b"), (2, "a")]}
+    assert len(widths) == 1
+    b = store.read(1, "b", 0, 100_000, max_points=500)
+    assert len(b) <= 500 and b.count.sum() == 70_000

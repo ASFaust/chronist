@@ -201,10 +201,11 @@ class SqliteRowStore:
             rng = self.step_range(run_id, key)
             if rng is None:
                 return Buckets.empty()
-            eff_lo = max(lo, rng[0])
-            eff_hi = min(hi, rng[1] + 1)
-            if eff_hi <= eff_lo:
+            if max(lo, rng[0]) > min(hi - 1, rng[1]):
                 return Buckets.empty()
+            # An explicit bound defines the grid; an open bound uses the data.
+            eff_lo = lo if start is not None else rng[0]
+            eff_hi = hi if end is not None else rng[1] + 1
             width = bucket_width(eff_lo, eff_hi, max_points)
 
         if width == 1:
