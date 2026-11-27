@@ -91,6 +91,8 @@ export function RunTable({ runs, selected, slots, cols, sort, onSort, onToggle, 
                 <div class="td name">
                   <${Swatch} slot=${slots.get(r.id)} />
                   <a href="#" onClick=${(e) => { e.preventDefault(); e.stopPropagation(); onOpen(r.id); }} title="Run details">${r.name}</a>
+                  ${r.meta && r.meta.code && r.meta.code.outside_imports && r.meta.code.outside_imports.length > 0 &&
+                    html`<span class="flag" title="Code snapshot may be incomplete: modules imported from outside the code root">⚠</span>`}
                   ${r.tags && r.tags.length > 0 && html`<span class="tags">${r.tags.slice(0, 3).map((t) => html`<span class="tag">${t}</span>`)}</span>`}
                 </div>` : html`<div class=${"td" + (c.num ? " num" : "")}>${cell(r, c)}</div>`)}
               <div class="td"></div>

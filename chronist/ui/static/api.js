@@ -42,6 +42,16 @@ async function request(method, path, body, signal) {
   return data;
 }
 
+async function requestText(path) {
+  const headers = {};
+  const t = getToken();
+  if (t) headers["Authorization"] = "Bearer " + t;
+  const r = await fetch(path, { headers });
+  if (r.status === 401 || r.status === 403) { onAuthNeeded(r.status); throw new AuthError("token required"); }
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch {} throw new ApiError(m, r.status); }
+  return r.text();
+}
+
 function qs(params) {
   const p = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") p.set(k, v);
@@ -58,6 +68,8 @@ export const api = {
   series: (body, signal) => request("POST", "/api/series", body, signal),
   patch: (id, body) => request("PATCH", `/api/runs/${id}`, body),
   del: (id) => request("DELETE", `/api/runs/${id}`),
+  code: (id) => request("GET", `/api/runs/${id}/code`),
+  codeFile: (id, path) => requestText(`/api/runs/${id}/code/file` + qs({ path })),
   exportUrl: (project, q, keys, format) => "/api/export" + qs({ project, q, keys: (keys || []).join(","), format, token: getToken() }),
 };
 

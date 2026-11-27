@@ -42,6 +42,52 @@ run.finish()                                                     # or: with chro
   the server (default after 180 s).
 - Resume: `chronist.init(resume="<uid>")` re-attaches and continues at the next step.
 
+## Code snapshots
+
+Every run records exactly which code ran, including uncommitted and untracked
+files (details: [docs/CODE_SNAPSHOTS.md](docs/CODE_SNAPSHOTS.md)).
+
+```python
+chronist.init(code="auto")      # default: git root, else nearest pyproject/setup.py, else the script's dir
+chronist.init(code="git")       # git root; error if not in a repo
+chronist.init(code="../..")     # relative to the entry script's directory (not the cwd)
+chronist.init(code=None)        # off
+chronist.init(code=chronist.Code(root=2, exclude=["data/"], max_total_mb=50, env_vars=["CUDA_VISIBLE_DEVICES"]))
+```
+
+- Precedence: the `code=` argument, then `CHRONIST_CODE`, then
+  `[tool.chronist] code = ".."` in `pyproject.toml` or `.chronist.toml`
+  (relative to that file), then auto.
+- Selection: `git ls-files` (tracked + untracked-not-ignored, including
+  submodules), `.gitignore` via pathspec outside git, `.chronistignore`, and a
+  built-in deny list. Checkpoints, data, venvs and secrets like `.env`, `*.key`
+  and `id_rsa` are never included. Files over 1 MB, binary files, and anything
+  past 50 MB total are skipped, and every skip is recorded with its reason.
+- Content is hashed and copied into `~/.chronist/blobs` (content-addressed,
+  compressed) inside `init()`, so later edits or `os.chdir` don't affect it.
+  Uploads send only the blobs the server lacks, so 1000 runs of the same repo
+  cost almost nothing.
+- Also stored: the package list, Python, platform, host, GPU, torch/CUDA
+  versions, the command line, and git info. Env vars are recorded only if listed
+  in `env_vars`.
+- Modules imported from outside the code root (e.g. via `sys.path.append`) are
+  reported at init and finish and flagged ⚠ in the UI.
+
+```
+chronist checkout <run> [dir]        # restore the tree (+ CHRONIST_RUN.json)
+chronist code diff <run_a> <run_b>   # changed files (unified diff) + config diff
+chronist snapshot [--code ..] [--run ID]
+```
+```python
+r = chronist.run(42)                 # or a uid
+r.code.files(); r.code.read("src/model.py"); r.code.checkout("/tmp/x")
+chronist.code_diff(41, 42)
+```
+
+The UI's run drawer has a **Code** tab: a file browser with a
+syntax-highlighted viewer, root/mode info, the skip report, and environment
+and package lists.
+
 ## Viewing
 
 **Local:** `chronist ui` starts the server on `localhost:7070` (no auth) and
@@ -130,6 +176,9 @@ dir (`~/.chronist/data`, read-only, safe while a server is running). Pass
 | `chronist serve [--host H] [--port N] [--token T] [--read-token R] [--no-auth]` | server for remote use |
 | `chronist sync [PATH...] [--url U] [--token T]` | upload offline/backlogged runs |
 | `chronist tokens [--new write\|read] [--revoke T]` | manage server tokens |
+| `chronist checkout <run> [dir] [--force]` | restore a run's code snapshot |
+| `chronist code diff <a> <b> [--stat]` | code + config diff of two runs |
+| `chronist snapshot [--code C] [--run ID]` | standalone snapshot (optionally attach to a run) |
 
 ## Architecture
 

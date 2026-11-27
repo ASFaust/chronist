@@ -2,6 +2,7 @@
 import { html, useState, useEffect } from "./vendor/htm-preact.module.js";
 import { api } from "./api.js";
 import { StatusBadge } from "./table.js";
+import { CodeTab } from "./code.js";
 import { fmtAgo, fmtDuration, fmtNum, fmtValue } from "./util.js";
 
 export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
@@ -49,11 +50,13 @@ export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
     ["git commit", m.git_commit ? m.git_commit.slice(0, 12) + (m.git_dirty ? " (dirty, diff " + (m.git_diff_hash || "?") + ")" : "") : null],
     ["git branch", m.git_branch], ["git remote", m.git_remote],
     ["cwd", m.cwd],
+    ["code root", m.code && m.code.root ? `${m.code.root} (${m.code.mode}, ${m.code.chosen_by})` : null],
+    ["code snapshot", m.code ? (m.code.aborted ? "aborted: " + m.code.aborted : m.code.manifest ? `${m.code.files} files, manifest ${m.code.manifest.slice(0, 12)}` : null) : "off"],
     ["command", m.command ? m.command.join(" ") : null],
   ].filter((r) => r[1]);
 
   return html`
-    <aside class="drawer" aria-label="Run details">
+    <aside class=${"drawer" + (tab === "code" ? " wide" : "")} aria-label="Run details">
       <div class="drawer-head">
         <input class="input title-input" value=${name} onInput=${(e) => setName(e.target.value)}
           onBlur=${() => name !== run.name && name.trim() && patch({ name: name.trim() })}
@@ -72,12 +75,13 @@ export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
           onBlur=${() => notes !== (run.notes || "") && patch({ notes })}></textarea>
       </div>
       <div class="tabs">
-        ${["config", "summary", "meta"].map((t) => html`<button class=${"tab" + (tab === t ? " on" : "")} onClick=${() => setTab(t)}>${t}</button>`)}
+        ${["config", "summary", "code", "meta"].map((t) => html`<button class=${"tab" + (tab === t ? " on" : "")} onClick=${() => setTab(t)}>${t}</button>`)}
       </div>
-      <div class="drawer-body">
+      <div class=${"drawer-body" + (tab === "code" ? " flush" : "")}>
         ${tab === "config" && html`<table class="kv">${Object.entries(run.config).map(([k, v]) => html`<tr><th>${k}</th><td>${fmtValue(v)}</td></tr>`)}
           ${Object.keys(run.config).length === 0 && html`<tr><td class="muted">No config</td></tr>`}</table>`}
         ${tab === "summary" && html`<table class="kv">${Object.entries(run.summary).map(([k, s]) => html`<tr><th>${k}</th><td>${fmtNum(s.value)} <span class="muted">@ ${fmtNum(s.step)}</span></td></tr>`)}</table>`}
+        ${tab === "code" && html`<${CodeTab} run=${run} />`}
         ${tab === "meta" && html`<table class="kv">${metaRows.map(([k, v]) => html`<tr><th>${k}</th><td class="mono">${v}</td></tr>`)}</table>`}
       </div>
       <div class="drawer-foot">

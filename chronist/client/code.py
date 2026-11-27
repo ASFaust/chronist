@@ -527,7 +527,9 @@ def outside_imports(root: str) -> List[dict]:
             continue
         if f.startswith(root_p) or f.startswith(here) or any(f.startswith(p) for p in sysp):
             continue
-        if "site-packages/" in f or "dist-packages/" in f:
+        if "site-packages/" in f or "dist-packages/" in f or f.startswith("/etc/"):
+            continue
+        if name in ("sitecustomize", "usercustomize", "__main__"):
             continue
         out.append({"module": name, "file": f})
     return sorted(out, key=lambda d: d["module"])
