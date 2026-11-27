@@ -345,13 +345,6 @@ class ChunkedStore:
                 wall = np.concatenate([lw[fresh_late], wall[~late]])
                 if len(step) == 0:
                     continue
-            before = con.total_changes
-            con.executemany(
-                "INSERT OR IGNORE INTO hot(run_id,key_id,step,value,wall) VALUES (?,?,?,?,?)",
-                zip([run_id] * len(step), [kid] * len(step), step.tolist(),
-                    [None if v != v else v for v in value.tolist()],
-                    [None if v != v else v for v in wall.tolist()]))
-            added = con.total_changes - before
             i_max = len(step) - 1
             con.execute(
                 """INSERT INTO series(run_id,key_id,sealed_upto,first_step,last_step,last_value)
@@ -365,17 +358,30 @@ class ChunkedStore:
             n = self._hot_n.get(hk)
             if n is None:
                 n = con.execute("SELECT count(*) FROM hot WHERE run_id=? AND key_id=?", hk).fetchone()[0]
-            else:
-                n += added
-            self._hot_n[hk] = n
-            if n >= 2 * self.chunk:
-                self._compact(con, run_id, kid)
+            if n + len(step) >= 2 * self.chunk:
+                # big enough to seal: go straight from memory, skipping the hot round-trip
+                self._compact(con, run_id, kid, extra=(step, value, wall))
+                continue
+            before = con.total_changes
+            self._insert_hot(con, run_id, kid, step, value, wall)
+            self._hot_n[hk] = n + con.total_changes - before
 
-    def _compact(self, con, run_id, kid, force_late: bool = True):
-        """Seal full chunks from hot, merge late points, extend the pyramid."""
+    @staticmethod
+    def _insert_hot(con, run_id, kid, step, value, wall):
+        con.executemany(
+            "INSERT OR IGNORE INTO hot(run_id,key_id,step,value,wall) VALUES (?,?,?,?,?)",
+            zip([run_id] * len(step), [kid] * len(step), step.tolist(),
+                [None if v != v else v for v in value.tolist()],
+                [None if v != v else v for v in wall.tolist()]))
+
+    def _compact(self, con, run_id, kid, force_late: bool = True, extra=None):
+        """Seal full chunks from hot (+ ``extra`` in-memory points, which lose
+        to existing hot rows on equal steps), merge late points, extend the pyramid."""
         row = self._series_row(con, run_id, kid)
         sealed = row[0]
         hs, hv, hw = self._hot_points(con, run_id, kid, -(2 ** 63), 2 ** 63 - 1)
+        if extra is not None:
+            hs, hv, hw = merge_points((hs, hv, hw), extra)
         if len(hs) == 0:
             return
         rebuild_lo = None
@@ -402,6 +408,9 @@ class ChunkedStore:
             # so the rebuild starts there, not at the first newly sealed step.
             seal_lo = int(hs[0]) if sealed is None else min(int(hs[0]), sealed + 1)
             rebuild_lo = seal_lo if rebuild_lo is None else min(rebuild_lo, seal_lo)
+        if extra is not None:  # hot now holds exactly the unsealed remainder
+            con.execute("DELETE FROM hot WHERE run_id=? AND key_id=?", (run_id, kid))
+            self._insert_hot(con, run_id, kid, hs[nseal:], hv[nseal:], hw[nseal:])
         self._hot_n[(run_id, kid)] = len(hs) - nseal
         if rebuild_lo is not None and new_sealed is not None:
             self._build_pyramid(con, run_id, kid, rebuild_lo, new_sealed)
