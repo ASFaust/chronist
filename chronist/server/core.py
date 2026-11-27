@@ -229,8 +229,9 @@ class Core:
     def series(self, run_ids: List[int], keys: List[str], start: Optional[int] = None,
                end: Optional[int] = None, max_points: Optional[int] = 2000, x: str = "step",
                group_by: Optional[List[str]] = None, agg: str = "mean_std") -> dict:
-        return series(self.meta, self.store, run_ids, keys, start, end, max_points, x, group_by, agg,
-                      pool=self.pool)
+        # Deliberately serial: concurrent SQLite reads in one process contend
+        # (global allocator mutex) and measured ~8x slower than a plain loop.
+        return series(self.meta, self.store, run_ids, keys, start, end, max_points, x, group_by, agg)
 
 
 # ---------------------------------------------------------------- series reads + aggregation
