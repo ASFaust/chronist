@@ -89,6 +89,8 @@ class _LocalSource:
     def __init__(self, data_dir: str):
         from .server.core import open_data_dir
         self.meta, self.store, _ = open_data_dir(data_dir, readonly=True)
+        from .blobs import FsBlobStore
+        self.blobs = FsBlobStore(os.path.join(os.path.abspath(os.path.expanduser(data_dir)), "blobs"))
 
     def query(self, q: str, project: Optional[str]) -> List[dict]:
         ids = self.meta.query_ids(project, q)
@@ -99,6 +101,26 @@ class _LocalSource:
 
     def keys(self, run_id: int) -> List[str]:
         return self.store.keys(run_id)
+
+    def get_run(self, ref) -> Optional[dict]:
+        rid = _as_id(ref)
+        if rid is None:
+            rid = self.meta.run_id_by_uid(str(ref))
+        if rid is None:
+            return None
+        r = self.meta.get_run(rid)
+        if r is not None:
+            r["keys"] = self.store.keys(rid)
+        return r
+
+    def manifest(self, run_id: int) -> Optional[dict]:
+        import json
+        h = self.meta.get_code(run_id)
+        raw = None if h is None else self.blobs.read(h)
+        return None if raw is None else {"hash": h, **json.loads(raw)}
+
+    def blob(self, h: str) -> Optional[bytes]:
+        return self.blobs.read(h)
 
     def close(self):
         self.store.close()
@@ -151,8 +173,43 @@ class _RemoteSource:
     def keys(self, run_id: int) -> List[str]:
         return self._get(f"/api/runs/{run_id}")["keys"]
 
+    def get_run(self, ref) -> Optional[dict]:
+        rid = _as_id(ref)
+        try:
+            if rid is None:
+                rid = self._get(f"/api/runs/by-uid/{quote(str(ref), safe='')}")["id"]
+            return self._get(f"/api/runs/{rid}")
+        except RuntimeError as e:
+            if "404" in str(e):
+                return None
+            raise
+
+    def manifest(self, run_id: int) -> Optional[dict]:
+        r = self.http.get(f"/api/runs/{run_id}/code")
+        if r.status_code == 404:
+            return None
+        _raise(r)
+        import msgpack
+        return msgpack.unpackb(r.content, raw=False, strict_map_key=False)
+
+    def blob(self, h: str) -> Optional[bytes]:
+        from .codec import decompress
+        r = self.http.get(f"/api/blobs/{h}")
+        if r.status_code == 404:
+            return None
+        _raise(r)
+        return decompress(r.content)
+
     def close(self):
         self.http.close()
+
+
+def _as_id(ref) -> Optional[int]:
+    if isinstance(ref, int) and not isinstance(ref, bool):
+        return ref
+    if isinstance(ref, str) and ref.isdigit():
+        return int(ref)
+    return None
 
 
 def _raise(r):
@@ -254,3 +311,142 @@ def runs(query: str = "", project: Optional[str] = None, *, url: Optional[str] =
     """Query runs. ``dataframe`` = "pandas" | "polars" | "dict"."""
     src = _open_source(url, token, data_dir)
     return RunSet(src, src.query(query, project), dataframe)
+
+
+# ---------------------------------------------------------------- single runs + code
+class CodeSnapshot:
+    """A run's code snapshot (manifest + content-addressed blobs)."""
+
+    def __init__(self, src, manifest: dict, run: dict):
+        self._src = src
+        self.manifest = manifest
+        self.run = run
+        self._by_path = {f["path"]: f for f in manifest["files"]}
+
+    @property
+    def hash(self) -> str:
+        return self.manifest["hash"]
+
+    @property
+    def root(self) -> dict:
+        return self.manifest["root"]
+
+    @property
+    def skipped(self) -> List[dict]:
+        return self.manifest["skipped"]
+
+    def files(self) -> List[str]:
+        return [f["path"] for f in self.manifest["files"]]
+
+    def read_bytes(self, path: str) -> bytes:
+        f = self._by_path.get(path)
+        if f is None:
+            raise FileNotFoundError(path)
+        if "symlink" in f:
+            return f["symlink"].encode()
+        data = self._src.blob(f["sha256"])
+        if data is None:
+            raise FileNotFoundError(f"blob for {path} missing")
+        return data
+
+    def read(self, path: str) -> str:
+        return self.read_bytes(path).decode("utf-8", errors="replace")
+
+    def env(self) -> dict:
+        import json
+        return json.loads(self._src.blob(self.manifest["env"]))
+
+    def packages(self) -> List[str]:
+        return self._src.blob(self.manifest["packages"]).decode().split()
+
+    def checkout(self, dest: str, force: bool = False) -> str:
+        """Restore the file tree into ``dest``; also writes CHRONIST_RUN.json."""
+        import json
+
+        from .client.code import write_tree
+        write_tree(self.manifest, self._src.blob, dest, force=force)
+        meta = self.run.get("meta", {})
+        info = {
+            "run": {k: self.run.get(k) for k in ("id", "uid", "project", "name", "status", "created")},
+            "config": self.run.get("config"),
+            "command": meta.get("command"),
+            "code": {k: v for k, v in (meta.get("code") or {}).items()},
+            "manifest": self.hash,
+            "env": self.env(),
+            "skipped": self.skipped,
+        }
+        with open(os.path.join(dest, "CHRONIST_RUN.json"), "w") as f:
+            json.dump(info, f, indent=2, default=str)
+        return os.path.abspath(dest)
+
+
+class RunRef:
+    """One run: ``chronist.run(id_or_uid)``."""
+
+    def __init__(self, src, data: dict, dataframe: Optional[str] = None):
+        self._src = src
+        self.data = data
+        self._df = dataframe
+        self._code: Any = False
+
+    def __getitem__(self, k):
+        return self.data[k]
+
+    def __repr__(self):
+        return f"<chronist run {self.data['id']} {self.data['name']!r}>"
+
+    id = property(lambda self: self.data["id"])
+    uid = property(lambda self: self.data["uid"])
+    name = property(lambda self: self.data["name"])
+    config = property(lambda self: self.data["config"])
+    summary = property(lambda self: self.data["summary"])
+    meta = property(lambda self: self.data["meta"])
+
+    @property
+    def code(self) -> Optional[CodeSnapshot]:
+        if self._code is False:
+            m = self._src.manifest(self.id)
+            self._code = None if m is None else CodeSnapshot(self._src, m, self.data)
+        return self._code
+
+    def history(self, keys=None, max_points=None, start=None, end=None):
+        return RunSet(self._src, [self.data], self._df).history(keys, max_points, start, end)
+
+
+def run(ref, *, url: Optional[str] = None, token: Optional[str] = None, data_dir: Optional[str] = None,
+        dataframe: Optional[str] = None) -> RunRef:
+    """A single run by server id or uid."""
+    src = _open_source(url, token, data_dir)
+    data = src.get_run(ref)
+    if data is None:
+        raise KeyError(f"run {ref!r} not found")
+    return RunRef(src, data, dataframe)
+
+
+def code_diff(a, b, *, url: Optional[str] = None, token: Optional[str] = None,
+              data_dir: Optional[str] = None, unified: bool = True) -> dict:
+    """Diff the code snapshots and configs of two runs.
+
+    Returns {"added", "removed", "changed": [paths], "diffs": {path: unified diff},
+             "config": {"added", "removed", "changed": {key: [a, b]}}}."""
+    import difflib
+
+    from .client.code import diff_manifests
+    ra = a if isinstance(a, RunRef) else run(a, url=url, token=token, data_dir=data_dir)
+    rb = b if isinstance(b, RunRef) else run(b, url=url, token=token, data_dir=data_dir)
+    out: Dict[str, Any] = {"added": [], "removed": [], "changed": [], "diffs": {}}
+    if ra.code is not None and rb.code is not None:
+        out.update(diff_manifests(ra.code.manifest, rb.code.manifest))
+        if unified:
+            for p in out["changed"]:
+                da, db = ra.code.read_bytes(p), rb.code.read_bytes(p)
+                if b"\0" in da[:8192] or b"\0" in db[:8192]:
+                    out["diffs"][p] = "binary files differ"
+                    continue
+                out["diffs"][p] = "".join(difflib.unified_diff(
+                    da.decode(errors="replace").splitlines(True), db.decode(errors="replace").splitlines(True),
+                    f"a/{p}", f"b/{p}"))
+    ca, cb = ra.config, rb.config
+    out["config"] = {"added": sorted(set(cb) - set(ca)), "removed": sorted(set(ca) - set(cb)),
+                     "changed": {k: [ca[k], cb[k]] for k in sorted(set(ca) & set(cb)) if ca[k] != cb[k]}}
+    return out

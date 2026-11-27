@@ -20,6 +20,7 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from ..blobs import valid_hash
 from ..query import QueryError
 from ..store import Buckets
 from .core import Core, decode_points
@@ -29,7 +30,7 @@ log = logging.getLogger("chronist.server")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "static")
 
 # Endpoints that are reads even though they are POST.
-READ_POSTS = {"/api/series"}
+READ_POSTS = {"/api/series", "/api/blobs/missing"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -344,6 +345,65 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
         return Response(sink.getvalue().to_pybytes(), media_type=media,
                         headers={"Content-Disposition": f'attachment; filename="chronist.{ext}"'})
 
+    # ---- code snapshots ----
+    async def blobs_missing(request):
+        body = await read_body(request)
+        hashes = body.get("hashes") or []
+        if not isinstance(hashes, list) or not all(isinstance(h, str) and valid_hash(h) for h in hashes):
+            raise ApiError(400, "hashes must be a list of sha256 hex strings")
+        return respond(request, {"missing": core.blobs.missing(hashes)})
+
+    async def put_blob(request):
+        h = request.path_params["hash"]
+        if not valid_hash(h):
+            raise ApiError(400, "bad hash")
+        data = await request.body()
+        if len(data) > 256 * 1024 * 1024:
+            raise ApiError(413, "blob too large")
+        await submit(core.op_put_blob, h, data)
+        return respond(request, {"ok": True})
+
+    @threaded
+    def get_blob(request):
+        h = request.path_params["hash"]
+        if not valid_hash(h):
+            return JSONResponse({"error": "bad hash"}, 400)
+        data = core.blobs.get(h)
+        if data is None:
+            return JSONResponse({"error": "not found"}, 404)
+        return Response(data, media_type="application/octet-stream",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+    async def set_code(request):
+        body = await read_body(request)
+        return respond(request, await submit(core.op_set_code, run_id_param(request), str(body.get("manifest", ""))))
+
+    @threaded
+    def get_code(request):
+        m = core.manifest(run_id_param(request))
+        if m is None:
+            return JSONResponse({"error": "no code snapshot for this run"}, 404)
+        return respond(request, m)
+
+    @threaded
+    def get_code_file(request):
+        """Raw content of one file (or env/packages blob) of a run's snapshot."""
+        rid = run_id_param(request)
+        m = core.manifest(rid)
+        if m is None:
+            return JSONResponse({"error": "no code snapshot for this run"}, 404)
+        path = request.query_params.get("path", "")
+        if path in ("__env__", "__packages__"):
+            h = m["env" if path == "__env__" else "packages"]
+        else:
+            f = next((f for f in m["files"] if f["path"] == path), None)
+            if f is None or "sha256" not in f:
+                return JSONResponse({"error": "no such file in snapshot"}, 404)
+            h = f["sha256"]
+        data = core.blobs.read(h)
+        return Response(data, media_type="text/plain; charset=utf-8",
+                        headers={"Cache-Control": "private, max-age=86400"})
+
     async def health(request):
         return JSONResponse({"ok": True, "auth": bool(tokens)})
 
@@ -366,6 +426,12 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
         Route("/api/runs/{run_id}/heartbeat", handle(heartbeat), methods=["POST"]),
         Route("/api/runs/{run_id}/finish", handle(finish), methods=["POST"]),
         Route("/api/runs/{run_id}/metrics/{key:path}", handle(metric), methods=["GET"]),
+        Route("/api/blobs/missing", handle(blobs_missing), methods=["POST"]),
+        Route("/api/blobs/{hash}", handle(put_blob), methods=["PUT"]),
+        Route("/api/blobs/{hash}", handle(get_blob), methods=["GET"]),
+        Route("/api/runs/{run_id}/code", handle(set_code), methods=["POST"]),
+        Route("/api/runs/{run_id}/code", handle(get_code), methods=["GET"]),
+        Route("/api/runs/{run_id}/code/file", handle(get_code_file), methods=["GET"]),
         Route("/api/keys", handle(keys)),
         Route("/api/suggest", handle(suggest)),
         Route("/api/series", handle(series), methods=["POST"]),

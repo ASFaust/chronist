@@ -32,7 +32,6 @@ import os
 import sqlite3
 import struct
 import threading
-import zlib
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -40,12 +39,7 @@ import numpy as np
 from .base import Buckets, Points, StoreStats, bucket_width
 from .sqlite_rows import connect
 
-try:
-    import zstandard as _zstd
-    _ZC = _zstd.ZstdCompressor(level=3)
-    _ZD = _zstd.ZstdDecompressor()
-except ImportError:  # pragma: no cover
-    _zstd = None
+from ..codec import compress as _compress, decompress as _decompress
 
 CHUNK = 4096
 FANOUT = 16
@@ -85,20 +79,6 @@ def _shuffle(a: np.ndarray) -> bytes:
 
 def _unshuffle(b: bytes, n: int, dtype) -> np.ndarray:
     return np.frombuffer(b, dtype=np.uint8).reshape(8, n).T.copy().view(dtype).reshape(n)
-
-
-def _compress(raw: bytes) -> bytes:
-    if _zstd is not None:
-        return b"Z" + _ZC.compress(raw)
-    return b"L" + zlib.compress(raw, 6)
-
-
-def _decompress(blob: bytes) -> bytes:
-    if blob[:1] == b"Z":
-        if _zstd is None:  # pragma: no cover
-            raise RuntimeError("chunk is zstd-compressed; pip install zstandard")
-        return _ZD.decompress(blob[1:])
-    return zlib.decompress(blob[1:])
 
 
 def encode(arrays: List[np.ndarray], delta: List[bool]) -> bytes:

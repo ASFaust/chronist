@@ -72,11 +72,46 @@ class Uploader:
         if self.run_id is not None:
             self._post(f"/api/runs/{self.run_id}/heartbeat", {})
 
+    def upload_code(self) -> None:
+        """Content-addressed code snapshot upload: only blobs the server lacks."""
+        if self.prog.get("code_done"):
+            return
+        snap = (self.rd.info().get("meta") or {}).get("code") or {}
+        mhash = snap.get("manifest")
+        if not mhash:
+            self.prog["code_done"] = True
+            self._save()
+            return
+        import json as _json
+
+        from ..blobs import FsBlobStore
+        from .code import manifest_blobs
+        store = FsBlobStore(self.rd.blobs_dir)
+        raw = store.read(mhash)
+        if raw is None:
+            log.warning("chronist: code manifest %s missing from %s; skipping code upload", mhash, store.path)
+            self.prog["code_done"] = True
+            self._save()
+            return
+        hashes = manifest_blobs(_json.loads(raw)) + [mhash]
+        missing = self._post("/api/blobs/missing", {"hashes": hashes})["missing"]
+        for h in missing:
+            data = store.get(h)
+            if data is None:
+                raise RuntimeError(f"blob {h} missing locally")
+            r = self.http.put(f"/api/blobs/{h}", content=data, headers={"Content-Type": "application/octet-stream"})
+            r.raise_for_status()
+        self._post(f"/api/runs/{self.run_id}/code", {"manifest": mhash})
+        self.prog["code_done"] = True
+        self.prog["code_blobs_sent"] = len(missing)
+        self._save()
+
     def upload_pending(self) -> int:
         """Upload everything currently on disk. Returns number of points sent."""
         if self.prog.get("gone"):
             return 0
         rid = self.ensure_run()
+        self.upload_code()
         sent = 0
         while True:
             seg, off = self.prog.get("seg", 0), self.prog.get("offset", 0)
@@ -111,6 +146,16 @@ class Uploader:
                         sent += n
                         batch, n = {}, 0
                         commit(i)
+                elif kind == "m":
+                    if batch:
+                        self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
+                        sent += n
+                        batch, n = {}, 0
+                    r = self.http.patch(f"/api/runs/{rid}", json={"meta": rec[1]})
+                    if r.status_code == 404:
+                        raise ServerGone(r.text)
+                    r.raise_for_status()
+                    commit(i)
                 elif kind in ("f", "r"):
                     # points before the status change go first
                     if batch:

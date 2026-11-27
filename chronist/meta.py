@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS summary (
     PRIMARY KEY (run_id, key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS summary_key ON summary(key, value);
+CREATE TABLE IF NOT EXISTS run_code (
+    run_id   INTEGER PRIMARY KEY,
+    manifest TEXT NOT NULL
+);
 """
 
 STATUSES = ("running", "finished", "crashed")
@@ -280,8 +284,17 @@ class MetadataStore:
 
     def patch(self, run_id: int, name: Optional[str] = None, notes: Optional[str] = None,
               tags: Optional[List[str]] = None, add_tags: Iterable[str] = (),
-              remove_tags: Iterable[str] = (), config: Optional[dict] = None) -> None:
+              remove_tags: Iterable[str] = (), config: Optional[dict] = None,
+              meta: Optional[dict] = None) -> None:
         with self.transaction() as con:
+            if meta:
+                old = json.loads(con.execute("SELECT meta FROM runs WHERE id=?", (run_id,)).fetchone()[0])
+                for k, v in meta.items():  # one level of dict merging
+                    if isinstance(v, dict) and isinstance(old.get(k), dict):
+                        old[k] = {**old[k], **v}
+                    else:
+                        old[k] = v
+                con.execute("UPDATE runs SET meta=? WHERE id=?", (json.dumps(old, default=str), run_id))
             if name is not None:
                 con.execute("UPDATE runs SET name=? WHERE id=?", (name, run_id))
             if notes is not None:
@@ -299,9 +312,17 @@ class MetadataStore:
 
     def delete_run(self, run_id: int) -> None:
         with self.transaction() as con:
-            for t in ("config", "tags", "summary"):
+            for t in ("config", "tags", "summary", "run_code"):
                 con.execute(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
             con.execute("DELETE FROM runs WHERE id=?", (run_id,))
+
+    def set_code(self, run_id: int, manifest: str) -> None:
+        with self.transaction() as con:
+            con.execute("INSERT OR REPLACE INTO run_code VALUES (?,?)", (run_id, manifest))
+
+    def get_code(self, run_id: int) -> Optional[str]:
+        row = self._r().execute("SELECT manifest FROM run_code WHERE run_id=?", (run_id,)).fetchone()
+        return row[0] if row else None
 
     def mark_crashed(self, timeout: float) -> List[int]:
         cutoff = time.time() - timeout
@@ -367,7 +388,7 @@ class MetadataStore:
                     "id": row[0], "uid": row[1], "project": row[2], "name": row[3], "status": row[4],
                     "created": row[5], "updated": row[6], "heartbeat": row[7], "finished": row[8],
                     "notes": row[9], "steps": row[10], "meta": json.loads(row[11]),
-                    "tags": [], "config": {}, "summary": {},
+                    "tags": [], "config": {}, "summary": {}, "code": None,
                 }
             if "tags" in include:
                 for rid, tag in con.execute(f"SELECT run_id, tag FROM tags WHERE run_id IN ({q}) ORDER BY tag", chunk):
@@ -376,6 +397,8 @@ class MetadataStore:
                 for rid, k, vt, vtext, vnum in con.execute(
                         f"SELECT run_id, key, vtype, v_text, v_num FROM config WHERE run_id IN ({q}) ORDER BY key", chunk):
                     out[rid]["config"][k] = decode_value(vt, vtext, vnum)
+            for rid, mh in con.execute(f"SELECT run_id, manifest FROM run_code WHERE run_id IN ({q})", chunk):
+                out[rid]["code"] = mh
             if "summary" in include:
                 for rid, k, st, v in con.execute(
                         f"SELECT run_id, key, step, value FROM summary WHERE run_id IN ({q}) ORDER BY key", chunk):

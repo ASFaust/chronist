@@ -15,6 +15,8 @@ import threading
 import time
 from typing import Any, Dict, Iterable, Optional
 
+from ..blobs import FsBlobStore
+from .code import CodeError, code_opts_from_env_and_config, outside_imports, take_snapshot
 from .rundir import RunDir, RunWriter, default_dir, new_uid, write_json_atomic
 from .uploader import BackgroundUploader
 
@@ -120,6 +122,7 @@ class Run:
     def __init__(self, rundir: RunDir, info: dict, url: Optional[str], token: Optional[str],
                  resume: bool, start_step: int):
         self.dir = rundir
+        self._info = info
         self.uid: str = info["uid"]
         self.project: str = info["project"]
         self.name: Optional[str] = info.get("name")
@@ -199,6 +202,7 @@ class Run:
         if self._finished:
             return
         self._finished = True
+        self._recheck_imports()
         self._writer.append(["f", status, time.time()])
         self._writer.close()
         if self._uploader is not None:
@@ -215,6 +219,22 @@ class Run:
         except Exception:  # pragma: no cover
             pass
 
+    def _recheck_imports(self):
+        """Imports can happen after init: re-run the outside-import check."""
+        snap = self._info.get("meta", {}).get("code") or {}
+        if not snap.get("root") or "manifest" not in snap:
+            return
+        try:
+            now = outside_imports(snap["root"])
+        except Exception:  # pragma: no cover
+            return
+        if now != snap.get("outside_imports"):
+            new = [m for m in now if m not in (snap.get("outside_imports") or [])]
+            for imp in new[:5]:
+                _logger.warning("chronist: imported local module %r from %s, outside code root %s",
+                                imp["module"], os.path.dirname(imp["file"]), snap["root"])
+            self._writer.append(["m", {"code": {"outside_imports": now}}])
+
     def _atexit(self):
         if not self._finished:
             self.finish("crashed" if _crashed else "finished")
@@ -230,9 +250,12 @@ class Run:
 def init(project: Optional[str] = None, name: Optional[str] = None, config: Any = None,
          tags: Iterable[str] = (), notes: str = "", *, resume: Optional[str] = None,
          url: Optional[str] = None, token: Optional[str] = None, dir: Optional[str] = None,
-         offline: bool = False, capture: bool = True) -> Run:
+         offline: bool = False, capture: bool = True, code: Any = "auto") -> Run:
     """Start (or resume) a run.
 
+    code: code snapshot. "auto" (default) | "git" | a path | None/False (off)
+        | chronist.Code(...). Relative paths resolve against the entry
+        script's directory. See docs/CODE_SNAPSHOTS.md.
     project: defaults to $CHRONIST_PROJECT or "default".
     resume: uid of a run to re-attach to and continue logging.
     url/token: server; default $CHRONIST_URL / $CHRONIST_TOKEN. No URL (or
@@ -242,9 +265,22 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
     global _active
     url = None if offline else (url or os.environ.get("CHRONIST_URL") or None)
     token = token or os.environ.get("CHRONIST_TOKEN") or None
-    root = os.path.join(dir or default_dir(), "runs")
+    base = os.path.abspath(os.path.expanduser(dir or default_dir()))  # absolute once; chdir-proof
+    root = os.path.join(base, "runs")
     project = project or os.environ.get("CHRONIST_PROJECT") or "default"
     cfg = _config_to_dict(config)
+    code_opts = code_opts_from_env_and_config(code)  # raises ValueError on bad input
+
+    def snapshot() -> Optional[dict]:
+        if code_opts is None:
+            return None
+        try:
+            return take_snapshot(code_opts, FsBlobStore(os.path.join(base, "blobs")))
+        except CodeError:
+            raise
+        except Exception as e:  # never kill a run over a snapshot problem
+            _logger.warning("chronist: code snapshot failed: %s", e)
+            return {"aborted": str(e)}
 
     if resume:
         rd = RunDir(os.path.join(root, resume))
@@ -256,20 +292,26 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
             last = rd.last_step()
             start = 0 if last is None else last + 1
         else:  # run created elsewhere: attach by uid
+            snap = snapshot()
             os.makedirs(rd.path, exist_ok=True)
             info = {"uid": resume, "project": project, "name": name, "config": cfg,
                     "tags": list(tags), "notes": notes, "created": time.time(),
                     "meta": capture_meta(rd.path) if capture else {}}
+            if snap:
+                info["meta"]["code"] = snap
             write_json_atomic(rd.info_path, info)
             start = _remote_next_step(url, token, resume) if url else 0
         run = Run(rd, info, url, token, resume=True, start_step=start)
     else:
+        snap = snapshot()
         uid = new_uid()
         rd = RunDir(os.path.join(root, uid))
         os.makedirs(rd.path, exist_ok=True)
         info = {"uid": uid, "project": project, "name": name, "config": cfg, "tags": list(tags),
                 "notes": notes, "created": time.time(),
                 "meta": capture_meta(rd.path) if capture else {}}
+        if snap:
+            info["meta"]["code"] = snap
         write_json_atomic(rd.info_path, info)
         run = Run(rd, info, url, token, resume=False, start_step=0)
     _active = run

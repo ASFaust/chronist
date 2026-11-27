@@ -12,6 +12,7 @@ Records::
     ["l", step, wall_time, {key: value, ...}]   logged scalars
     ["f", status, when]                         finish
     ["r", when]                                 resumed (new process attached)
+    ["m", {meta}]                               metadata update (merged into run meta)
 """
 from __future__ import annotations
 
@@ -59,6 +60,11 @@ class RunDir:
     def info(self) -> dict:
         with open(self.info_path) as f:
             return json.load(f)
+
+    @property
+    def blobs_dir(self) -> str:
+        """Shared content-addressed store: <CHRONIST_DIR>/blobs (runs are <CHRONIST_DIR>/runs/<uid>)."""
+        return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(self.path))), "blobs")
 
     def exists(self) -> bool:
         return os.path.exists(self.info_path)

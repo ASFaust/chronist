@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ..blobs import FsBlobStore, valid_hash
 from ..meta import MetadataStore
 from ..store import Buckets, MetricStore, Series, bucket_width, open_store
 from ..store.cache import CachingStore
@@ -141,6 +142,7 @@ class Core:
         self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
         self.meta, store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
         self.store = CachingStore(store)
+        self.blobs = FsBlobStore(os.path.join(self.data_dir, "blobs"))
         self.writer = Writer()
         self.events = Broadcaster()
         self.heartbeat_timeout = heartbeat_timeout
@@ -209,7 +211,9 @@ class Core:
 
     def op_patch(self, run_id: int, body: dict) -> dict:
         project = self._check_run(run_id)
-        allowed = {"name", "notes", "tags", "add_tags", "remove_tags"}
+        allowed = {"name", "notes", "tags", "add_tags", "remove_tags", "meta"}
+        if "meta" in body and not isinstance(body["meta"], dict):
+            raise ValueError("meta must be an object")
         self.meta.patch(run_id, **{k: v for k, v in body.items() if k in allowed})
         self.events.publish({"type": "run", "project": project, "run_id": run_id})
         return {"ok": True}
@@ -220,6 +224,32 @@ class Core:
         self.meta.delete_run(run_id)
         self.events.publish({"type": "deleted", "project": project, "run_id": run_id})
         return {"ok": True}
+
+    def op_put_blob(self, h: str, data: bytes) -> dict:
+        self.blobs.put(h, data)  # verifies the hash
+        return {"ok": True}
+
+    def op_set_code(self, run_id: int, manifest: str) -> dict:
+        project = self._check_run(run_id)
+        if not valid_hash(manifest):
+            raise ValueError("bad manifest hash")
+        raw = self.blobs.read(manifest)
+        if raw is None:
+            raise ValueError("manifest blob not uploaded")
+        from ..client.code import manifest_blobs
+        missing = self.blobs.missing(manifest_blobs(json.loads(raw)))
+        if missing:
+            raise ValueError(f"{len(missing)} blobs referenced by the manifest are missing")
+        self.meta.set_code(run_id, manifest)
+        self.events.publish({"type": "run", "project": project, "run_id": run_id})
+        return {"ok": True}
+
+    def manifest(self, run_id: int) -> Optional[dict]:
+        h = self.meta.get_code(run_id)
+        if h is None:
+            return None
+        raw = self.blobs.read(h)
+        return None if raw is None else {"hash": h, **json.loads(raw)}
 
     def op_mark_crashed(self) -> List[int]:
         ids = self.meta.mark_crashed(self.heartbeat_timeout)

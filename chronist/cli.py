@@ -139,6 +139,90 @@ def cmd_tokens(a):
         print(f"{role:6s} {t}")
 
 
+def _source_args(p):
+    p.add_argument("--url", default=None, help="server (default $CHRONIST_URL; else the local data dir)")
+    p.add_argument("--token", default=None)
+    p.add_argument("--data", default=None, help="local data dir (default ~/.chronist/data)")
+
+
+def cmd_checkout(a):
+    from .readback import run
+    r = run(a.run, url=a.url, token=a.token, data_dir=a.data)
+    if r.code is None:
+        print(f"run {a.run} has no code snapshot", file=sys.stderr)
+        return 1
+    dest = a.dir or f"chronist-checkout-{r.id}"
+    from .client.code import CodeError
+    try:
+        path = r.code.checkout(dest, force=a.force)
+    except CodeError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"restored {len(r.code.files())} files of run {r.id} ({r.name}) into {path}")
+    cmd = (r.meta.get("command") or [])
+    if cmd:
+        print("command:", " ".join(cmd))
+
+
+def cmd_snapshot(a):
+    import os
+
+    from .blobs import FsBlobStore
+    from .client import code as C
+    from .client.rundir import default_dir
+    C._REFERENCE_OVERRIDE = os.getcwd()
+    opts = C.parse_code_arg(a.code if a.code.lower() != "none" else None) or C.Code()
+    base = os.path.abspath(os.path.expanduser(default_dir()))
+    store = FsBlobStore(os.path.join(base, "blobs"))
+    snap = C.take_snapshot(opts, store)
+    if "manifest" not in snap:
+        print(f"snapshot aborted: {snap.get('aborted')}", file=sys.stderr)
+        return 1
+    print(f"{snap['manifest']}  {snap['files']} files, {snap['bytes'] / 1024:.1f} KB, root {snap['root']} "
+          f"({snap['mode']})")
+    if a.run:
+        import httpx
+
+        from .client.code import manifest_blobs
+        url = a.url or os.environ.get("CHRONIST_URL")
+        token = a.token or os.environ.get("CHRONIST_TOKEN")
+        if not url:
+            print("--run needs a server (--url or CHRONIST_URL)", file=sys.stderr)
+            return 1
+        h = {"Authorization": f"Bearer {token}"} if token else {}
+        with httpx.Client(base_url=url.rstrip("/"), headers=h, timeout=60) as http:
+            hashes = manifest_blobs(json.loads(store.read(snap["manifest"]))) + [snap["manifest"]]
+            r = http.post("/api/blobs/missing", json={"hashes": hashes})
+            r.raise_for_status()
+            for bh in r.json()["missing"]:
+                http.put(f"/api/blobs/{bh}", content=store.get(bh)).raise_for_status()
+            r = http.post(f"/api/runs/{a.run}/code", json={"manifest": snap["manifest"]})
+            if r.status_code >= 400:
+                print(f"attaching failed: {r.text}", file=sys.stderr)
+                return 1
+            http.patch(f"/api/runs/{a.run}", json={"meta": {"code": snap}}).raise_for_status()
+        print(f"attached to run {a.run}")
+
+
+def cmd_code_diff(a):
+    from .readback import code_diff
+    d = code_diff(a.a, a.b, url=a.url, token=a.token, data_dir=a.data, unified=not a.stat)
+    for k, sign in (("removed", "-"), ("added", "+"), ("changed", "M")):
+        for p in d[k]:
+            print(f"{sign} {p}")
+    c = d["config"]
+    for k in c["removed"]:
+        print(f"- config {k}")
+    for k in c["added"]:
+        print(f"+ config {k}")
+    for k, (va, vb) in c["changed"].items():
+        print(f"M config {k}: {va!r} -> {vb!r}")
+    if not a.stat:
+        for p, txt in d["diffs"].items():
+            print()
+            print(txt, end="" if txt.endswith("\n") else "\n")
+
+
 def main(argv=None):
     from .server.core import default_data_dir
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -177,6 +261,29 @@ def main(argv=None):
     p.add_argument("--new", choices=["write", "read"])
     p.add_argument("--revoke", metavar="TOKEN")
     p.set_defaults(fn=cmd_tokens)
+
+    p = sub.add_parser("checkout", help="restore a run's code snapshot into a directory")
+    p.add_argument("run", help="run id or uid")
+    p.add_argument("dir", nargs="?", default=None, help="default ./chronist-checkout-<id>")
+    p.add_argument("--force", action="store_true", help="write into a non-empty directory")
+    _source_args(p)
+    p.set_defaults(fn=cmd_checkout)
+
+    p = sub.add_parser("snapshot", help="take a standalone code snapshot (root resolved from the cwd)")
+    p.add_argument("--code", default="auto", help="auto | git | <path>")
+    p.add_argument("--run", default=None, help="attach to this run id on the server")
+    p.add_argument("--url", default=None)
+    p.add_argument("--token", default=None)
+    p.set_defaults(fn=cmd_snapshot)
+
+    p = sub.add_parser("code", help="code snapshot tools")
+    csub = p.add_subparsers(dest="code_cmd", required=True)
+    d = csub.add_parser("diff", help="diff code + config of two runs")
+    d.add_argument("a")
+    d.add_argument("b")
+    d.add_argument("--stat", action="store_true", help="only list changed files and config keys")
+    _source_args(d)
+    d.set_defaults(fn=cmd_code_diff)
 
     a = ap.parse_args(argv)
     sys.exit(a.fn(a) or 0)
