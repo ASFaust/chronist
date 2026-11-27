@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chronist"
+version = "0.1.0"
+description = "Lightweight, self-hostable experiment tracker for ML research"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.22",
+    "msgpack>=1.0",
+    "httpx>=0.24",
+    "starlette>=0.27",
+    "uvicorn>=0.22",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.5"]
+polars = ["polars>=0.20"]
+export = ["pyarrow>=12"]
+dev = ["pytest", "pandas", "polars", "pyarrow"]
+
+[project.scripts]
+chronist = "chronist.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["chronist*"]
+
+[tool.setuptools.package-data]
+chronist = ["ui/static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
