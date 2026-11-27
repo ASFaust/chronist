@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 import time
@@ -108,8 +109,9 @@ def test_offline_then_sync(server, tmp_path):
     assert res[0]["points"] == 500
     rs = chronist.runs("a = 1", project="off", url=server.url)
     assert rs[0]["status"] == "finished" and rs[0]["steps"] == 4990
-    # re-sync uploads nothing new
-    assert chronist.sync(url=server.url, verbose=False)[0]["points"] == 0
+    # uploaded + finished -> local buffer pruned; nothing left to sync
+    assert not os.path.exists(run.dir.path)
+    assert chronist.sync(url=server.url, verbose=False) == []
 
 
 def test_server_down_then_up(tmp_path):
@@ -289,3 +291,50 @@ def test_readback_paging(server, monkeypatch):
         assert d["count"].sum() == 1000
         pl = chronist.runs("", project="p", dataframe="polars", **kw).history("x")
         assert pl.height == 1000 and pl["run"][0] == rs[0]["name"]
+
+
+def test_prune_lifecycle(server, tmp_path, monkeypatch):
+    from chronist.client.prune import prune, uploaded_to
+    root = tmp_path / "client"
+    # live run: pruned at finish, blobs of its snapshot removed too
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("A = 1\n")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    run = chronist.init(project="p", url=server.url, code=str(src))
+    run.log({"x": 1.0})
+    run.finish()
+    assert not os.path.exists(run.dir.path)
+    blobs = [f for d in (root / "blobs").glob("*") for f in d.iterdir()] if (root / "blobs").exists() else []
+    assert blobs == []
+    # finished but upload failed (server down): kept until synced
+    port = free_port()
+    r2 = chronist.init(project="p", url=f"http://127.0.0.1:{port}", code=None)
+    r2.log({"x": 1.0})
+    r2.finish(timeout=0.3)
+    assert os.path.exists(r2.dir.path) and uploaded_to(chronist.client.rundir.RunDir(r2.dir.path)) == []
+    # still-running offline run is never pruned
+    r3 = chronist.init(project="p", offline=True, code=None)
+    r3.log({"x": 1.0})
+    r3._writer.flush()
+    res = prune([str(root)], verbose=False)  # nothing is fully uploaded yet
+    assert res["pruned"] == 0 and os.path.exists(r2.dir.path) and os.path.exists(r3.dir.path)
+    chronist.sync(url=server.url, verbose=False)
+    assert not os.path.exists(r2.dir.path)  # finished + now uploaded -> pruned
+    assert os.path.exists(r3.dir.path)  # still running
+    r3.finish()
+    chronist.sync(url=server.url, verbose=False)
+    assert not os.path.exists(r3.dir.path)
+    # resuming a pruned run works through the server
+    r4 = chronist.init(project="p", url=server.url, resume=run.uid, code=None)
+    assert r4.step == 1
+    r4.finish()
+    # opt out
+    monkeypatch.setenv("CHRONIST_KEEP_LOCAL", "1")
+    r5 = chronist.init(project="p", url=server.url, code=None)
+    r5.log({"x": 1.0})
+    r5.finish()
+    assert os.path.exists(r5.dir.path)
+    assert prune([str(root)], dry_run=True, verbose=False)["pruned"] == 1
+    assert os.path.exists(r5.dir.path)
+    assert prune([str(root)], verbose=False)["pruned"] == 1 and not os.path.exists(r5.dir.path)

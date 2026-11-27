@@ -298,6 +298,7 @@ def small_proj(tmp_path):
 
 def test_dedup_init_time_content_and_checkout(server, cdir, tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("CHRONIST_KEEP_LOCAL", "1")  # we inspect upload progress afterwards
     r = small_proj(tmp_path)
     run1 = chronist.init(project="p", url=server.url, code=str(r), config={"lr": 1})
     (r / "model.py").write_text("A = 2  # edited during the run\n")  # after init: must not leak in
@@ -351,6 +352,7 @@ def test_offline_then_sync_same_manifest(server, cdir, tmp_path, monkeypatch):
 
 def test_upload_resumes_after_interruption(cdir, tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("CHRONIST_KEEP_LOCAL", "1")
     r = small_proj(tmp_path)
     port = free_port()
     url = f"http://127.0.0.1:{port}"

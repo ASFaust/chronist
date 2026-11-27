@@ -62,6 +62,14 @@ def sync_run(rd: RunDir, url: str, token: Optional[str] = None, mark_dead_crashe
         lock.close()
 
 
+def _sync_and_prune(rd: RunDir, url: str, token: Optional[str]) -> dict:
+    res = sync_run(rd, url, token)
+    if "error" not in res and "skipped" not in res:
+        from .prune import auto_prune
+        res["pruned"] = auto_prune(rd, url.rstrip("/"))
+    return res
+
+
 def sync(paths: Optional[Iterable[str]] = None, url: Optional[str] = None, token: Optional[str] = None,
          verbose: bool = True) -> List[dict]:
     url = url or os.environ.get("CHRONIST_URL")
@@ -71,7 +79,7 @@ def sync(paths: Optional[Iterable[str]] = None, url: Optional[str] = None, token
     results = []
     for rd in find_runs(paths or [default_dir()]):
         try:
-            res = sync_run(rd, url, token)
+            res = _sync_and_prune(rd, url, token)
         except Exception as e:  # keep going with other runs
             res = {"uid": os.path.basename(rd.path), "error": str(e)}
         results.append(res)

@@ -171,8 +171,10 @@ class Uploader:
                         batch, n = {}, 0
                     if kind == "f":
                         self._post(f"/api/runs/{rid}/finish", {"status": rec[1], "when": rec[2]})
+                        self.prog["finish_sent"] = True
                     else:
                         self.ensure_run(resume=True)
+                        self.prog["finish_sent"] = False
                     commit(i)
                 # unknown record kinds (from newer clients) are skipped
             if batch:

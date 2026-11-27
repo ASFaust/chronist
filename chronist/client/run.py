@@ -222,6 +222,13 @@ class Run:
             if timeout is None:
                 timeout = float(os.environ.get("CHRONIST_FINISH_TIMEOUT", "60"))
             ok = self._uploader.stop(timeout)
+            if ok:
+                from .prune import auto_prune
+                try:
+                    if auto_prune(self.dir, self.url.rstrip("/")):
+                        _logger.info("chronist: run %s uploaded; local buffer removed", self.uid)
+                except Exception as e:  # pragma: no cover - cleanup must never fail a run
+                    _logger.debug("chronist: prune failed: %s", e)
             if not ok:
                 _logger.warning("chronist: could not upload everything for run %s; it is buffered in %s. "
                             "Upload later with: chronist sync %s", self.uid, self.dir.path, self.dir.path)
