@@ -77,10 +77,10 @@ def cmd_ui(a):
     url = f"http://{a.host}:{a.port}"
 
     def ready():
-        print(f"chronist UI on {url}  (data: {core.data_dir})")
+        print(f"chronist UI on {url}  (data: {core.data_dir})", flush=True)
         if a.watch:
             root = a.watch_dir or default_dir()
-            print(f"watching {root} for offline runs")
+            print(f"watching {root} for offline runs", flush=True)
             threading.Thread(target=_watch_local, args=(url, root), daemon=True).start()
         if a.browser:
             webbrowser.open(url)
@@ -111,7 +111,7 @@ def cmd_serve(a):
     def ready():
         auth = f"{sum(1 for v in tokens.values() if v == 'write')} write / " \
                f"{sum(1 for v in tokens.values() if v == 'read')} read tokens" if tokens else "auth OFF"
-        print(f"chronist serving on http://{a.host}:{a.port}  ({auth}; data: {core.data_dir})")
+        print(f"chronist serving on http://{a.host}:{a.port}  ({auth}; data: {core.data_dir})", flush=True)
     _run_server(core, a.host, a.port, tokens, on_ready=ready)
 
 
