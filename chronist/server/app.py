@@ -203,6 +203,13 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
             raise ApiError(400, f"bad points payload: {e}")
         return respond(request, await submit(core.op_log, rid, pts))
 
+    async def rewind(request):
+        body = await read_body(request)
+        step = body.get("step")
+        if not isinstance(step, int) or isinstance(step, bool):
+            raise ApiError(400, "step must be an integer")
+        return respond(request, await submit(core.op_rewind, run_id_param(request), step))
+
     async def heartbeat(request):
         return respond(request, await submit(core.op_heartbeat, run_id_param(request)))
 
@@ -494,6 +501,7 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
         Route("/api/runs/{run_id}", handle(delete_run), methods=["DELETE"]),
         Route("/api/runs/{run_id}/log", handle(log_points), methods=["POST"]),
         Route("/api/runs/{run_id}/heartbeat", handle(heartbeat), methods=["POST"]),
+        Route("/api/runs/{run_id}/rewind", handle(rewind), methods=["POST"]),
         Route("/api/runs/{run_id}/finish", handle(finish), methods=["POST"]),
         Route("/api/runs/{run_id}/metrics/{key:path}", handle(metric), methods=["GET"]),
         Route("/api/blobs/missing", handle(blobs_missing), methods=["POST"]),

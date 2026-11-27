@@ -120,7 +120,7 @@ def _flatten_metrics(d: dict, prefix: str = "", out: Optional[dict] = None) -> d
 # ---------------------------------------------------------------- Run
 class Run:
     def __init__(self, rundir: RunDir, info: dict, url: Optional[str], token: Optional[str],
-                 resume: bool, start_step: int):
+                 resume: bool, start_step: int, rewind: Optional[int] = None):
         self.dir = rundir
         self._info = info
         self.uid: str = info["uid"]
@@ -131,7 +131,13 @@ class Run:
         self._writer = RunWriter(rundir)
         if resume:
             self._writer.append(["r", time.time()])
+        if rewind is not None:
+            self._writer.append(["w", int(rewind)])
         self._step = start_step
+        # On a plain resume, steps below this were already logged and new
+        # values there would be dropped (first write wins): warn once.
+        self._floor = start_step if resume and rewind is None else None
+        self._warned_floor = False
         self._last_time: Dict[str, float] = {}
         self._finished = False
         self._lock = threading.Lock()
@@ -191,6 +197,13 @@ class Run:
                     return
                 self._last_time[sig] = now
             values = _flatten_metrics(data)
+            if self._floor is not None and s < self._floor and not self._warned_floor:
+                self._warned_floor = True
+                _logger.warning(
+                    "chronist: logging step %d, but this resumed run already has data up to step %d. "
+                    "Values at already-logged steps are ignored (first write wins). To resume from an "
+                    "earlier checkpoint, use chronist.init(resume=%r, rewind=%d).",
+                    s, self._floor - 1, self.uid, s)
             if values:
                 self._writer.append(["l", s, now, values])
             self._step = max(self._step, s + 1)
@@ -250,7 +263,8 @@ class Run:
 def init(project: Optional[str] = None, name: Optional[str] = None, config: Any = None,
          tags: Iterable[str] = (), notes: str = "", *, resume: Optional[str] = None,
          url: Optional[str] = None, token: Optional[str] = None, dir: Optional[str] = None,
-         offline: bool = False, capture: bool = True, code: Any = "auto") -> Run:
+         offline: bool = False, capture: bool = True, code: Any = "auto",
+         rewind: Optional[int] = None) -> Run:
     """Start (or resume) a run.
 
     code: code snapshot. "auto" (default) | "git" | a path | None/False (off)
@@ -258,6 +272,8 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
         script's directory. See docs/CODE_SNAPSHOTS.md.
     project: defaults to $CHRONIST_PROJECT or "default".
     resume: uid of a run to re-attach to and continue logging.
+    rewind: with resume, discard everything the run logged at step >= rewind
+        (e.g. resuming from an earlier checkpoint); logging continues there.
     url/token: server; default $CHRONIST_URL / $CHRONIST_TOKEN. No URL (or
         offline=True) -> only local files; upload later with `chronist sync`.
     dir: local buffer root; default $CHRONIST_DIR or ~/.chronist.
@@ -270,6 +286,11 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
     project = project or os.environ.get("CHRONIST_PROJECT") or "default"
     cfg = _config_to_dict(config)
     code_opts = code_opts_from_env_and_config(code)  # raises ValueError on bad input
+    if rewind is not None:
+        if not resume:
+            raise ValueError("rewind= needs resume=<run uid>")
+        if isinstance(rewind, bool) or not isinstance(rewind, int) or rewind < 0:
+            raise ValueError("rewind must be a non-negative integer step")
 
     def snapshot() -> Optional[dict]:
         if code_opts is None:
@@ -291,6 +312,8 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
                 write_json_atomic(rd.info_path, info)
             last = rd.last_step()
             start = 0 if last is None else last + 1
+            if rewind is not None:
+                start = min(start, rewind)
         else:  # run created elsewhere: attach by uid
             snap = snapshot()
             os.makedirs(rd.path, exist_ok=True)
@@ -301,7 +324,9 @@ def init(project: Optional[str] = None, name: Optional[str] = None, config: Any 
                 info["meta"]["code"] = snap
             write_json_atomic(rd.info_path, info)
             start = _remote_next_step(url, token, resume) if url else 0
-        run = Run(rd, info, url, token, resume=True, start_step=start)
+            if rewind is not None:
+                start = min(start, rewind)
+        run = Run(rd, info, url, token, resume=True, start_step=start, rewind=rewind)
     else:
         snap = snapshot()
         uid = new_uid()

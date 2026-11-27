@@ -146,6 +146,13 @@ class Uploader:
                         sent += n
                         batch, n = {}, 0
                         commit(i)
+                elif kind == "w":
+                    if batch:
+                        self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)
+                        sent += n
+                        batch, n = {}, 0
+                    self._post(f"/api/runs/{rid}/rewind", {"step": int(rec[1])})
+                    commit(i)
                 elif kind == "m":
                     if batch:
                         self._post(f"/api/runs/{rid}/log", {"points": batch}, packed=True)

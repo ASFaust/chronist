@@ -267,6 +267,15 @@ class MetadataStore:
                         "status = CASE WHEN status='crashed' THEN 'running' ELSE status END WHERE id=?",
                         (mx, now, now, run_id))
 
+    def replace_summary(self, run_id: int, last: Dict[str, Tuple[int, float]]) -> None:
+        """Set the summary exactly (after a rewind removed points)."""
+        with self.transaction() as con:
+            con.execute("DELETE FROM summary WHERE run_id=?", (run_id,))
+            con.executemany("INSERT INTO summary(run_id, key, step, value) VALUES (?,?,?,?)",
+                            [(run_id, k, int(st), _f(v)) for k, (st, v) in last.items()])
+            steps = max((int(st) for st, _ in last.values()), default=None)
+            con.execute("UPDATE runs SET steps=?, updated=? WHERE id=?", (steps, time.time(), run_id))
+
     def heartbeat(self, run_id: int) -> None:
         now = time.time()
         with self.transaction() as con:

@@ -13,6 +13,7 @@ Records::
     ["f", status, when]                         finish
     ["r", when]                                 resumed (new process attached)
     ["m", {meta}]                               metadata update (merged into run meta)
+    ["w", step]                                 rewind: discard everything at step >= step
 """
 from __future__ import annotations
 
@@ -159,6 +160,8 @@ class RunDir:
         for rec in self.all_records():
             if rec[0] == "l":
                 last = rec[1] if last is None else max(last, rec[1])
+            elif rec[0] == "w":  # rewind: everything >= rec[1] is gone
+                last = None if last is None or rec[1] <= 0 else min(last, rec[1] - 1)
         return last
 
     def finished(self) -> Optional[list]:

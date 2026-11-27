@@ -221,3 +221,52 @@ def test_auth_client(tmp_path):
             chronist.runs("", project="p", url=srv.url, token="bad")
     finally:
         srv.stop()
+
+
+def test_resume_with_rewind(server, caplog):
+    run = chronist.init(project="p", url=server.url)
+    for i in range(100):
+        run.log({"x": float(i), "y": 1.0})
+    run.finish()
+    # plain resume logging an old step: warned, value ignored
+    r2 = chronist.init(project="p", url=server.url, resume=run.uid)
+    assert r2.step == 100
+    with caplog.at_level("WARNING", logger="chronist"):
+        r2.log({"x": -1.0}, step=50)
+    assert "rewind=50" in caplog.text
+    r2.finish()
+    df = chronist.runs("", project="p", url=server.url).history("x")
+    assert df[df.step == 50]["value"].iloc[0] == 50.0
+    # resume from checkpoint at step 60: steps >= 60 replaced
+    r3 = chronist.init(project="p", url=server.url, resume=run.uid, rewind=60)
+    assert r3.step == 60
+    for i in range(60, 80):
+        r3.log({"x": 1000.0 + i})
+    r3.finish()
+    rs = chronist.runs("", project="p", url=server.url)
+    df = rs.history(["x", "y"])
+    x = df[df.key == "x"]
+    assert x.step.tolist() == list(range(80)) and x[x.step == 70]["value"].iloc[0] == 1070.0
+    assert df[df.key == "y"].step.max() == 59  # y was not re-logged after the rewind
+    assert rs[0]["steps"] == 79 and rs[0]["summary"]["y"]["step"] == 59
+    # local resume picks up after the rewound history
+    r4 = chronist.init(project="p", url=server.url, resume=run.uid)
+    assert r4.step == 80
+    r4.finish()
+    with pytest.raises(ValueError):
+        chronist.init(project="p", offline=True, rewind=5)
+
+
+def test_offline_rewind_then_sync(server):
+    run = chronist.init(project="p", offline=True)
+    for i in range(50):
+        run.log({"x": float(i)})
+    run.finish()
+    r2 = chronist.init(project="p", offline=True, resume=run.uid, rewind=20)
+    for i in range(20, 30):
+        run_v = 500.0 + i
+        r2.log({"x": run_v})
+    r2.finish()
+    chronist.sync(url=server.url, verbose=False)
+    x = chronist.runs("", project="p", url=server.url).history("x")
+    assert x.step.tolist() == list(range(30)) and x.value.tolist()[25] == 525.0

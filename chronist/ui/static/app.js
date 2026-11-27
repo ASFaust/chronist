@@ -90,12 +90,14 @@ function App() {
     if (!project) return;
     return openStream(project, (evs) => {
       const changed = new Set();
+      const rewound = new Set();
       let runEv = false;
       for (const ev of evs) {
         if (ev.type === "points") changed.add(ev.run_id);
+        else if (ev.type === "rewind") { rewound.add(ev.run_id); changed.add(ev.run_id); runEv = true; }
         else runEv = true;
       }
-      if (changed.size) { setLive((l) => ({ seq: l.seq + 1, runs: changed })); reloadRunsSoon(); reloadKeysSoon(); }
+      if (changed.size) { setLive((l) => ({ seq: l.seq + 1, runs: changed, full: rewound })); reloadRunsSoon(); reloadKeysSoon(); }
       if (runEv) { reloadRunsSoon(); loadProjects(); }
     });
   }, [project, reloadRunsSoon]);

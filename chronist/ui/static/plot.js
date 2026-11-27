@@ -204,6 +204,7 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
   const pendingChanged = useRef(new Set());
   useEffect(() => {
     if (!live || !live.runs) return;
+    if (live.full && runIds.some((id) => live.full.has(id))) { fetchFull(); return; }  // rewind: history changed
     let any = false;
     for (const id of live.runs) if (runIds.includes(id)) { pendingChanged.current.add(id); any = true; }
     if (any) {

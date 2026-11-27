@@ -198,6 +198,16 @@ class Core:
             self.store.maintain()
         return {"points": n}
 
+    def op_rewind(self, run_id: int, step: int) -> dict:
+        """Discard every point at step >= ``step`` (resume from an earlier checkpoint)."""
+        project = self._check_run(run_id)
+        step = int(step)
+        self.store.delete_range(run_id, step)
+        keys = self.store.keys(run_id)
+        self.meta.replace_summary(run_id, self.store.last(run_id, keys))
+        self.events.publish({"type": "rewind", "project": project, "run_id": run_id, "step": step})
+        return {"ok": True, "step": step}
+
     def op_heartbeat(self, run_id: int) -> dict:
         self._check_run(run_id)
         self.meta.heartbeat(run_id)
