@@ -380,7 +380,11 @@ def test_histograms_end_to_end(server):
         assert len(out["runs"][0]["steps"]) <= 5
         if mode == "heatmap":
             mat = np.array(out["runs"][0]["matrix"]).reshape(-1, 20)
-            np.testing.assert_allclose(mat.sum(axis=1), 1000, rtol=1e-3)
+            # robust range (default): what's not in view is reported as "outside"
+            np.testing.assert_allclose(mat.sum(axis=1) + np.array(out["runs"][0]["outside"]), 1000, rtol=1e-4)
+            full = httpx.post(f"{server.url}/api/hist/render", json={"runs": [run.id], "key": "w", "mode": mode,
+                                                                    "max_steps": 5, "rows": 20, "robust": False}).json()
+            np.testing.assert_allclose(np.array(full["runs"][0]["matrix"]).reshape(-1, 20).sum(axis=1), 1000, rtol=1e-4)
         else:
             assert out["runs"][0]["q50"][0] == pytest.approx(0.0, abs=0.2)
     out = httpx.post(f"{server.url}/api/hist/render",
