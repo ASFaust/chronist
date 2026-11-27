@@ -15,6 +15,7 @@ dependencies = [
     "starlette>=0.27",
     "uvicorn>=0.22",
     "pathspec>=0.10",
+    "zstandard>=0.18",
     "tomli>=1.1; python_version < '3.11'",
 ]
 
@@ -22,8 +23,7 @@ dependencies = [
 pandas = ["pandas>=1.5"]
 polars = ["polars>=0.20"]
 export = ["pyarrow>=12"]
-dev = ["pytest", "pytest-xdist", "pandas", "polars", "pyarrow", "zstandard"]
-chunked = ["zstandard"]
+dev = ["pytest", "pytest-xdist", "pandas", "polars", "pyarrow"]
 
 [project.scripts]
 chronist = "chronist.cli:main"

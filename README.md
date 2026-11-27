@@ -213,7 +213,7 @@ client (training process)                 server (the only writer)
                  │                              ├─ REST /api/*, SSE /api/stream, static UI
   uploader thread ─► POST /api/runs/{id}/log ──►├─ single writer thread (queue)
   chronist sync  ─┘   (gzip msgpack, retried)   │     ├─ MetadataStore  (SQLite: runs, config EAV, tags, summaries)
-                                                │     └─ MetricStore    (swappable; v1: SqliteRowStore)
+                                                │     └─ MetricStore    (swappable; default: ChunkedStore)
                                                 └─ readers: per-thread read-only SQLite connections (WAL)
 ```
 

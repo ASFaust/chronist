@@ -25,6 +25,7 @@ from ..store.cache import CachingStore
 log = logging.getLogger("chronist.server")
 
 DATA_VERSION = 1
+DEFAULT_METRIC_STORE = "chunked"  # new data dirs; existing ones keep what chronist.json records
 
 
 def default_data_dir() -> str:
@@ -44,7 +45,7 @@ def open_data_dir(path: str, readonly: bool = False, metric_store: Optional[str]
         if readonly:
             raise FileNotFoundError(f"no chronist data dir at {path}")
         os.makedirs(path, exist_ok=True)
-        cfg = {"version": DATA_VERSION, "metric_store": metric_store or "sqlite_rows"}
+        cfg = {"version": DATA_VERSION, "metric_store": metric_store or DEFAULT_METRIC_STORE}
         with open(cfg_path, "w") as f:
             json.dump(cfg, f, indent=2)
     meta = MetadataStore(os.path.join(path, "meta.sqlite"), readonly=readonly)
