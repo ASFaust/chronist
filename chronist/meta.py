@@ -564,8 +564,10 @@ class MetadataStore:
         if order.startswith("last(") and order.endswith(")"):
             params.append(order[5:-1])
             return "(SELECT s.value FROM summary s WHERE s.run_id=r.id AND s.key=?)"
-        if order.startswith("config."):
-            order = order[7:]
+        if order.startswith("config.") and len(order) > 7:  # same rule as the query language
+            params += [order, order, order[7:]]
+            return ("(SELECT coalesce(c.v_num, c.v_text) FROM config c WHERE c.run_id=r.id AND c.key = CASE WHEN "
+                    "EXISTS (SELECT 1 FROM config c2 WHERE c2.run_id=r.id AND c2.key=?) THEN ? ELSE ? END)")
         params.append(order)
         return "(SELECT coalesce(c.v_num, c.v_text) FROM config c WHERE c.run_id=r.id AND c.key=?)"
 
@@ -668,7 +670,12 @@ class MetadataStore:
             for f in Q.RUN_FIELDS:
                 items.append({"label": f, "insert": f, "kind": "run field"})
             for k in self.config_keys(project):
-                ins = k["key"] if k["key"] not in Q.RUN_FIELDS and _plain_ident(k["key"]) else f"`{k['key']}`"
+                if not _plain_ident(k["key"]):
+                    ins = f"`{k['key']}`"
+                elif k["key"] in Q.RUN_FIELDS:
+                    ins = f"config.{k['key']}"  # same name as in tables and the UI
+                else:
+                    ins = k["key"]
                 items.append({"label": k["key"], "insert": ins, "kind": "config",
                               "detail": f"{k['distinct']} values"})
             for m in self.metric_keys(project):

@@ -5,8 +5,9 @@
     last(loss) < 0.1 and status in [running, finished]
 
 Fields
-    any flattened config key (``model.arch``), backtick-quoted for odd names or
-    names that collide with run fields (```name```);
+    any flattened config key (``model.arch``); for odd names or names that
+    collide with run fields use backticks (```tags```) or the ``config.``
+    prefix (``config.tags``, as in tables and the UI);
     run fields: id, name, status, tags, notes, created, updated, heartbeat, steps;
     metric summaries: ``last(<metric>)``.
 Operators
@@ -15,7 +16,9 @@ Values
     "strings", 'strings', numbers, true, false, null, or bare words (= strings).
 
 Semantics: ``a != x`` is ``not (a = x)``, so it also matches runs that do not
-have ``a`` at all. Nothing is ever evaluated as Python.
+have ``a`` at all. ``contains`` is a case-insensitive substring test for
+strings and an element test for lists (``layers contains 64``). Nothing is
+ever evaluated as Python.
 """
 from __future__ import annotations
 
@@ -326,13 +329,26 @@ class Compiler:
             raise QueryError(f"last({key}) must be compared with a number")
         return f"EXISTS ({base} AND s.value {SQL_OPS[op]} {self.p(float(v))})"
 
+    def key_match(self, key: str) -> str:
+        """SQL for "c.key is this config key". ``config.<k>`` means the key
+        ``config.<k>`` if the run has one, otherwise ``<k>`` (how config keys
+        named like run fields appear in tables and the UI)."""
+        if key.startswith("config.") and len(key) > 7:
+            full = self.p(key)
+            exists = f"EXISTS (SELECT 1 FROM config c2 WHERE c2.run_id=r.id AND c2.key={self.p(key)})"
+            return f"c.key = CASE WHEN {exists} THEN {full} ELSE {self.p(key[7:])} END"
+        return f"c.key={self.p(key)}"
+
     def config_field(self, key: str, op: str, v: Any) -> str:
-        base = f"SELECT 1 FROM config c WHERE c.run_id=r.id AND c.key={self.p(key)}"
+        base = f"SELECT 1 FROM config c WHERE c.run_id=r.id AND {self.key_match(key)}"
         if op == "exists":
             return f"EXISTS ({base})"
         if op == "contains":
-            return (f"EXISTS ({base} AND c.vtype IN ('str','list') "
-                    f"AND instr(lower(c.v_text), lower({self.p(str(v))})) > 0)")
+            # strings: case-insensitive substring; lists: an element equal to the value
+            sv = str(v).lower() if not isinstance(v, bool) else ("1" if v else "0")
+            return (f"EXISTS ({base} AND ((c.vtype='str' AND instr(lower(c.v_text), {self.p(sv)}) > 0) "
+                    f"OR (c.vtype='list' AND EXISTS (SELECT 1 FROM json_each(c.v_text) j "
+                    f"WHERE lower(CAST(j.value AS TEXT)) = {self.p(sv)}))))")
         sop = SQL_OPS[op]
         if v is None:
             if op != "=":

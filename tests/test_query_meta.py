@@ -164,3 +164,40 @@ def test_high_cardinality_values_not_suggested(tmp_path):
     assert m.config_values("p", "seed") is None
     assert m.config_values("p", "lr") is None
     assert len(m.config_values("p", "arch")) == 2
+
+
+@pytest.fixture
+def listmeta(tmp_path):
+    m = MetadataStore(str(tmp_path / "lm.db"))
+    m.create_run("p", "a", name="a", config={"tags": ["g1", "g2"], "layers": [64, 128], "note": "Group G2 test"},
+                 tags=["real"])
+    m.create_run("p", "b", name="b", config={"tags": ["g20"], "layers": [6, 4], "config": {"lr": 0.1}, "lr": 9})
+    m.create_run("p", "c", name="c", config={"tags": "g2-as-string"})
+    yield m
+    m.close()
+
+
+@pytest.mark.parametrize("q,expected", [
+    ('config.tags contains "g2"', ["a", "c"]),       # reported: returned nothing in 0.1.2
+    ('`tags` contains "g2"', ["a", "c"]),            # backticks: same key
+    ('config.tags contains "G1"', ["a"]),            # list element, case-insensitive
+    ('config.tags contains "g20"', ["b"]),           # not a substring match on the JSON text
+    ("layers contains 64", ["a"]),                   # numeric element; [6, 4] doesn't "contain" 64
+    ('layers contains "128"', ["a"]),
+    ('note contains "g2 t"', ["a"]),                 # strings stay substring
+    ("config.tags exists", ["a", "b", "c"]),
+    ("tags contains real", ["a"]),                   # plain `tags` is still the run's tags
+    ("config.lr = 0.1", ["b"]),                      # a real nested "config.lr" key wins
+    ("lr = 9", ["b"]),
+])
+def test_config_prefix_and_list_contains(listmeta, q, expected):
+    assert names(listmeta, q, project="p") == expected
+
+
+def test_suggest_and_order_use_config_prefix(listmeta):
+    items = {i["label"]: i["insert"] for i in listmeta.suggest("p", "")["items"]}
+    assert items["tags"] in ("tags", "config.tags")  # the run field "tags" and the config key both listed
+    cfg_insert = [i["insert"] for i in listmeta.suggest("p", "")["items"] if i["label"] == "tags" and i["kind"] == "config"]
+    assert cfg_insert == ["config.tags"]
+    ids = listmeta.query_ids("p", "", order="config.tags", desc=False)
+    assert len(ids) == 3
