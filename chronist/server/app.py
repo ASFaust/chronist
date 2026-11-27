@@ -29,6 +29,9 @@ log = logging.getLogger("chronist.server")
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "static")
 
+RAW_PAGE = 250_000  # max raw points per response (bounds response-building memory)
+EXPORT_PAGE = 100_000  # points per export page (= parquet row group)
+
 # Endpoints that are reads even though they are POST.
 READ_POSTS = {"/api/series"}
 
@@ -281,11 +284,26 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
 
     @threaded
     def metric(request):
+        """Downsampled (max_points) or raw points. Raw reads are paged: at most
+        ``limit`` points (default and cap: RAW_PAGE); if more remain, the
+        response carries ``next_start`` for the next request."""
         rid = run_id_param(request)
         mp = qint(request, "max_points")
-        b: Buckets = core.store.read(rid, request.path_params["key"], qint(request, "start"),
-                                     qint(request, "end"), mp)
-        return respond(request, {"run_id": rid, "key": request.path_params["key"], **b.to_dict()})
+        if mp is not None:
+            mp = max(1, min(mp, 20000))
+            b: Buckets = core.store.read(rid, request.path_params["key"], qint(request, "start"),
+                                         qint(request, "end"), mp)
+            return respond(request, {"run_id": rid, "key": request.path_params["key"], **b.to_dict()})
+        limit = max(1, min(qint(request, "limit", RAW_PAGE), RAW_PAGE))
+        b = core.store.read(rid, request.path_params["key"], qint(request, "start"), qint(request, "end"),
+                            None, limit=limit)
+        # raw: min = max = mean = last and count = 1, so send just the points
+        out = {"run_id": rid, "key": request.path_params["key"], "raw": True,
+               "step": b.step.tolist(), "value": b.to_dict()["last"] if len(b) else [],
+               "wall_time": b.to_dict().get("wall_time") if len(b) else None, "next_start": None}
+        if len(b) == limit:
+            out["next_start"] = int(b.step[-1]) + 1
+        return respond(request, out)
 
     async def series(request):
         body = await read_body(request)
@@ -299,8 +317,9 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
         if not isinstance(keys, list) or not keys:
             raise ApiError(400, "keys must be a non-empty list")
         mp = body.get("max_points", 2000)
-        if mp is not None:
-            mp = max(1, min(int(mp), 20000))
+        if mp is None:
+            raise ApiError(400, "max_points is required here (<= 20000); raw points: GET /api/runs/{id}/metrics/{key}")
+        mp = max(1, min(int(mp), 20000))
 
         def work():
             return core.series([int(r) for r in run_ids], keys, body.get("start"), body.get("end"), mp,
@@ -346,39 +365,65 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> S
 
     @threaded
     def export(request):
+        """Streamed export: memory stays bounded by one page of points."""
+        import tempfile
+
+        from starlette.background import BackgroundTask
+
+        from ..readback import iter_pages
         p = request.query_params
         project = p.get("project") or None
         ids = core.meta.query_ids(project, p.get("q", ""))
-        keys = [k for k in p.get("keys", "").split(",") if k]
+        keys = [k for k in p.get("keys", "").split(",") if k] or None
         fmt = p.get("format", "parquet")
         mp = qint(request, "max_points")
-        from ..readback import long_table
-        table = long_table(core.meta, core.store, ids, keys or None, max_points=mp)
+        if mp is not None:
+            mp = max(1, min(mp, 20000))
+        cols = ["run_id", "run", "key", "step", "value", "wall_time"] + (["min", "max", "count"] if mp else [])
+        pages = iter_pages(core.meta, core.store, ids, keys, max_points=mp, page=EXPORT_PAGE)
         if fmt == "csv":
             import csv
-            buf = io.StringIO()
-            cols = list(table)
-            w = csv.writer(buf, lineterminator="\n")
-            w.writerow(cols)
-            w.writerows(zip(*[table[c] for c in cols]))
-            return Response(buf.getvalue(), media_type="text/csv",
-                            headers={"Content-Disposition": 'attachment; filename="chronist.csv"'})
+
+            def gen():
+                buf = io.StringIO()
+                w = csv.writer(buf, lineterminator="\n")
+                w.writerow(cols)
+                yield buf.getvalue()
+                for page in pages:
+                    buf.seek(0)
+                    buf.truncate()
+                    rows = zip(*[page[c].tolist() for c in cols])
+                    w.writerows([["" if (isinstance(v, float) and v != v) else v for v in r] for r in rows])
+                    yield buf.getvalue()
+            return StreamingResponse(gen(), media_type="text/csv",
+                                     headers={"Content-Disposition": 'attachment; filename="chronist.csv"'})
         try:
             import pyarrow as pa
         except ImportError:
             return JSONResponse({"error": "pyarrow not installed on the server; use format=csv"}, 400)
-        t = pa.table(table)
-        sink = pa.BufferOutputStream()
-        if fmt == "arrow":
-            with pa.ipc.new_stream(sink, t.schema) as w:
-                w.write_table(t)
-            media, ext = "application/vnd.apache.arrow.stream", "arrow"
-        else:
-            import pyarrow.parquet as pq
-            pq.write_table(t, sink, compression="zstd")
-            media, ext = "application/vnd.apache.parquet", "parquet"
-        return Response(sink.getvalue().to_pybytes(), media_type=media,
-                        headers={"Content-Disposition": f'attachment; filename="chronist.{ext}"'})
+        fields = [("run_id", pa.int64()), ("run", pa.string()), ("key", pa.string()), ("step", pa.int64()),
+                  ("value", pa.float64()), ("wall_time", pa.float64())]
+        if mp:
+            fields += [("min", pa.float64()), ("max", pa.float64()), ("count", pa.int64())]
+        schema = pa.schema(fields)
+        fd, path = tempfile.mkstemp(prefix="chronist-export-", suffix="." + fmt)
+        os.close(fd)
+        try:
+            if fmt == "arrow":
+                writer = pa.ipc.new_stream(path, schema)
+                media, ext = "application/vnd.apache.arrow.stream", "arrow"
+            else:
+                import pyarrow.parquet as pq
+                writer = pq.ParquetWriter(path, schema, compression="zstd")
+                media, ext = "application/vnd.apache.parquet", "parquet"
+            with writer:
+                for page in pages:
+                    writer.write_table(pa.table({c: page[c] for c in cols}, schema=schema))
+        except BaseException:
+            os.remove(path)
+            raise
+        return FileResponse(path, media_type=media, filename=f"chronist.{ext}",
+                            background=BackgroundTask(os.remove, path))
 
     # ---- code snapshots ----
     async def blobs_missing(request):

@@ -45,7 +45,7 @@ def test_create_log_read(client):
     log(client, rid, {"loss": (range(100), [1.0 / (i + 1) for i in range(100)])})
     log(client, rid, {"loss": (range(50, 150), [9.0] * 100)})  # half duplicate
     r = client.get(f"/api/runs/{rid}/metrics/loss").json()
-    assert len(r["step"]) == 150 and r["last"][0] == 1.0 and r["last"][99] == 0.01
+    assert len(r["step"]) == 150 and r["value"][0] == 1.0 and r["value"][99] == 0.01
     r = client.get(f"/api/runs/{rid}/metrics/loss", params={"max_points": 10}).json()
     assert len(r["step"]) <= 10 and sum(r["count"]) == 150
     runs = client.get("/api/runs", params={"project": "p", "q": "model.arch = lstm"}).json()
@@ -65,7 +65,7 @@ def test_msgpack_gzip_ingest(client):
     assert r.json() == {"points": 3}
     r = client.get(f"/api/runs/{rid}/metrics/train/loss")
     d = r.json()
-    assert d["last"] == [1.0, None, 3.0] and d["wall_time"] == [1.0, 2.0, 3.0]
+    assert d["value"] == [1.0, None, 3.0] and d["wall_time"] == [1.0, 2.0, 3.0]
     r = client.get(f"/api/runs/{rid}/metrics/train/loss", headers={"Accept": "application/msgpack"})
     assert msgpack.unpackb(r.content)["step"] == [0, 1, 2]
 
@@ -125,8 +125,10 @@ def test_series_and_grouping(client):
     assert groups["gru"]["center"][0] == pytest.approx(11.0)
     assert max(groups["gru"]["step"]) < 500 and groups["lstm"]["n"][0] == 3
     # x = another metric
+    assert client.post("/api/series", json={"runs": [ids[("lstm", 0)]], "keys": ["loss"],
+                                            "max_points": None}).status_code == 400
     r = client.post("/api/series", json={"runs": [ids[("lstm", 0)]], "keys": ["loss"], "x": "acc",
-                                         "max_points": None}).json()
+                                         "max_points": 20000}).json()
     s = r["series"][0]
     assert s["x"][:3] == [0.0, 1.0, 2.0]
     r = client.post("/api/series", json={"runs": [ids[("lstm", 0)]], "keys": ["loss"], "agg": "median_iqr",
@@ -191,3 +193,25 @@ def test_concurrent_writers(client, core):
     [t.join() for t in ts]
     assert not errors
     assert core.store.stats().points == 8 * 5 * 2000
+
+
+def test_raw_paging(client, monkeypatch):
+    import chronist.server.app as appmod
+    monkeypatch.setattr(appmod, "RAW_PAGE", 300)
+    rid = mkrun(client)["id"]
+    log(client, rid, {"x": (range(1000), [float(i) for i in range(1000)])})
+    got, start = [], None
+    while True:
+        d = client.get(f"/api/runs/{rid}/metrics/x", params={"start": start} if start is not None else {}).json()
+        assert len(d["step"]) <= 300
+        got += d["step"]
+        if d["next_start"] is None:
+            break
+        start = d["next_start"]
+    assert got == list(range(1000))
+    assert len(client.get(f"/api/runs/{rid}/metrics/x", params={"limit": 10**9}).json()["step"]) == 300
+    # streamed csv export spans pages
+    import chronist.readback as rb
+    monkeypatch.setattr(rb, "PAGE", 77)
+    lines = client.get("/api/export", params={"format": "csv"}).text.strip().splitlines()
+    assert len(lines) == 1001

@@ -138,10 +138,10 @@ def decode_points(payload: dict) -> Dict[str, Series]:
 # ---------------------------------------------------------------- core
 class Core:
     def __init__(self, data_dir: str, metric_store: Optional[str] = None,
-                 heartbeat_timeout: float = 180.0):
+                 heartbeat_timeout: float = 180.0, cache_mb: float = 64.0):
         self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
         self.meta, store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
-        self.store = CachingStore(store)
+        self.store = CachingStore(store, max_mb=cache_mb)
         self.blobs = FsBlobStore(os.path.join(self.data_dir, "blobs"))
         self.writer = Writer()
         self.events = Broadcaster()

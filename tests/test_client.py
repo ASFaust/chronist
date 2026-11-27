@@ -270,3 +270,22 @@ def test_offline_rewind_then_sync(server):
     chronist.sync(url=server.url, verbose=False)
     x = chronist.runs("", project="p", url=server.url).history("x")
     assert x.step.tolist() == list(range(30)) and x.value.tolist()[25] == 525.0
+
+
+def test_readback_paging(server, monkeypatch):
+    import chronist.readback as rb
+    import chronist.server.app as appmod
+    monkeypatch.setattr(appmod, "RAW_PAGE", 128)
+    monkeypatch.setattr(rb, "PAGE", 100)
+    run = chronist.init(project="p", url=server.url)
+    for i in range(1000):
+        run.log({"x": float(i), "y": -float(i)})
+    run.finish()
+    for kw in ({"url": server.url}, {"data_dir": server.data_dir}):
+        rs = chronist.runs("", project="p", **kw)
+        df = rs.history(["x", "y"])
+        assert len(df) == 2000 and df[df.key == "x"].step.tolist() == list(range(1000))
+        d = chronist.runs("", project="p", dataframe="dict", **kw).history("x", max_points=10)
+        assert d["count"].sum() == 1000
+        pl = chronist.runs("", project="p", dataframe="polars", **kw).history("x")
+        assert pl.height == 1000 and pl["run"][0] == rs[0]["name"]

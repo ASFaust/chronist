@@ -20,39 +20,76 @@ from urllib.parse import quote
 import numpy as np
 
 
-def long_table(meta, store, run_ids: List[int], keys: Optional[List[str]] = None,
-               max_points: Optional[int] = None, start: Optional[int] = None,
-               end: Optional[int] = None) -> Dict[str, list]:
-    """Columns of a long table straight from the stores (local mode, export)."""
-    runs = {r["id"]: r for r in meta.get_runs(run_ids, include=())}
-    cols: Dict[str, list] = {c: [] for c in ("run_id", "run", "key", "step", "value", "wall_time")}
-    if max_points is not None:
+PAGE = 1_000_000  # raw points per read: bounds transient memory
+
+
+def _empty_cols(downsampled: bool) -> Dict[str, list]:
+    cols = {c: [] for c in ("run_id", "run", "key", "step", "value", "wall_time")}
+    if downsampled:
         for c in ("min", "max", "count"):
             cols[c] = []
-    for rid in run_ids:
-        if rid not in runs:
-            continue
-        for k in (keys if keys is not None else store.keys(rid)):
-            b = store.read(rid, k, start, end, max_points)
-            n = len(b)
-            if n == 0:
-                continue
-            _append_buckets(cols, rid, runs[rid]["name"], k, b.to_dict(), raw=max_points is None)
     return cols
 
 
-def _append_buckets(cols: Dict[str, list], rid: int, name: str, key: str, b: dict, raw: bool):
-    n = len(b["step"])
-    cols["run_id"].extend([rid] * n)
-    cols["run"].extend([name] * n)
-    cols["key"].extend([key] * n)
-    cols["step"].extend(b["step"])
-    cols["value"].extend(b["last"] if raw else b["mean"])
-    cols["wall_time"].extend(b.get("wall_time") or [None] * n)
-    if "min" in cols:
-        cols["min"].extend(b["min"])
-        cols["max"].extend(b["max"])
-        cols["count"].extend(b["count"])
+def _page_cols(rid: int, name: str, key: str, b, raw: bool) -> Dict[str, np.ndarray]:
+    """One read (Buckets) as numpy columns."""
+    n = len(b)
+    out = {
+        "run_id": np.full(n, rid, dtype=np.int64),
+        "run": np.full(n, name, dtype=object),
+        "key": np.full(n, key, dtype=object),
+        "step": np.asarray(b.step, dtype=np.int64),
+        "value": np.asarray(b.last if raw else b.mean, dtype=np.float64),
+        "wall_time": (np.asarray(b.wall_time, dtype=np.float64) if b.wall_time is not None
+                      else np.full(n, np.nan)),
+    }
+    if not raw:
+        out["min"] = np.asarray(b.min, dtype=np.float64)
+        out["max"] = np.asarray(b.max, dtype=np.float64)
+        out["count"] = np.asarray(b.count, dtype=np.int64)
+    return out
+
+
+def iter_pages(meta, store, run_ids: List[int], keys: Optional[List[str]] = None,
+               max_points: Optional[int] = None, start: Optional[int] = None,
+               end: Optional[int] = None, page: int = PAGE):
+    """Yield numpy column pages of a long table straight from the stores.
+    Raw reads are paged so no single read holds more than ``page`` points."""
+    names = {r["id"]: r["name"] for r in meta.get_runs(run_ids, include=())}
+    for rid in run_ids:
+        if rid not in names:
+            continue
+        for k in (keys if keys is not None else store.keys(rid)):
+            if max_points is not None:
+                b = store.read(rid, k, start, end, max_points)
+                if len(b):
+                    yield _page_cols(rid, names[rid], k, b, raw=False)
+                continue
+            s = start
+            while True:
+                b = store.read(rid, k, s, end, None, limit=page)
+                if len(b) == 0:
+                    break
+                yield _page_cols(rid, names[rid], k, b, raw=True)
+                if len(b) < page:
+                    break
+                s = int(b.step[-1]) + 1
+
+
+def _concat(pages, downsampled: bool) -> Dict[str, np.ndarray]:
+    cols = _empty_cols(downsampled)
+    for p in pages:
+        for c in cols:
+            cols[c].append(p[c])
+    dtypes = {"run_id": np.int64, "step": np.int64, "count": np.int64, "run": object, "key": object}
+    return {c: (np.concatenate(v) if v else np.zeros(0, dtypes.get(c, np.float64))) for c, v in cols.items()}
+
+
+def long_table(meta, store, run_ids: List[int], keys: Optional[List[str]] = None,
+               max_points: Optional[int] = None, start: Optional[int] = None,
+               end: Optional[int] = None) -> Dict[str, np.ndarray]:
+    """Columns (numpy arrays) of a long table straight from the stores."""
+    return _concat(iter_pages(meta, store, run_ids, keys, max_points, start, end), max_points is not None)
 
 
 def _frame(cols: Dict[str, list], backend: str):
@@ -96,7 +133,7 @@ class _LocalSource:
         ids = self.meta.query_ids(project, q)
         return self.meta.get_runs(ids)
 
-    def history(self, run_ids, keys, max_points, start, end) -> Dict[str, list]:
+    def history(self, run_ids, keys, max_points, start, end):
         return long_table(self.meta, self.store, run_ids, keys, max_points, start, end)
 
     def keys(self, run_id: int) -> List[str]:
@@ -150,25 +187,29 @@ class _RemoteSource:
     def query(self, q: str, project: Optional[str]) -> List[dict]:
         return self._get("/api/runs", q=q, project=project)["runs"]
 
-    def history(self, run_ids, keys, max_points, start, end) -> Dict[str, list]:
-        cols: Dict[str, list] = {c: [] for c in ("run_id", "run", "key", "step", "value", "wall_time")}
-        if max_points is not None:
-            for c in ("min", "max", "count"):
-                cols[c] = []
-        names = {}
+    def history(self, run_ids, keys, max_points, start, end):
+        from .store import Buckets
+        pages = []
         for rid in run_ids:
-            if keys is None:
-                run = self._get(f"/api/runs/{rid}")
-                names[rid] = run["name"]
-                rkeys = run["keys"]
-            else:
-                rkeys = keys
-            for k in rkeys:
-                params = {"start": start, "end": end, "max_points": max_points}
-                b = self._get(f"/api/runs/{rid}/metrics/{quote(k, safe='/')}", **params)
-                if b["step"]:
-                    _append_buckets(cols, rid, names.get(rid, ""), k, b, raw=max_points is None)
-        return cols
+            run = self._get(f"/api/runs/{rid}")
+            for k in (keys if keys is not None else run["keys"]):
+                s = start
+                while True:
+                    params = {"start": s, "end": end, "max_points": max_points}
+                    d = self._get(f"/api/runs/{rid}/metrics/{quote(k, safe='/')}", **params)
+                    if d["step"]:
+                        f = lambda name: np.array([np.nan if v is None else v for v in d[name]], dtype=np.float64)
+                        wt = f("wall_time") if d.get("wall_time") else None
+                        if d.get("raw"):
+                            b = Buckets.from_raw(np.asarray(d["step"], np.int64), f("value"), wt)
+                        else:
+                            b = Buckets(np.asarray(d["step"], np.int64), f("min"), f("max"), f("mean"), f("last"),
+                                        np.asarray(d["count"], np.int64), wt)
+                        pages.append(_page_cols(rid, run["name"], k, b, raw=max_points is None))
+                    if d.get("next_start") is None:
+                        break
+                    s = d["next_start"]
+        return _concat(pages, max_points is not None)
 
     def keys(self, run_id: int) -> List[str]:
         return self._get(f"/api/runs/{run_id}")["keys"]
@@ -292,8 +333,6 @@ class RunSet:
         if isinstance(keys, str):
             keys = [keys]
         cols = self._src.history(self.ids, list(keys) if keys is not None else None, max_points, start, end)
-        names = {r["id"]: r["name"] for r in self.runs}
-        cols["run"] = [names.get(i, "") for i in cols["run_id"]]
         return _frame(cols, self._df)
 
     def keys(self) -> List[str]:
