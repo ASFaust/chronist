@@ -393,3 +393,67 @@ def test_server_rejects_bad_blobs(server):
     rid = httpx.post(f"{server.url}/api/runs", json={"uid": "u", "project": "p"}).json()["id"]
     assert httpx.post(f"{server.url}/api/runs/{rid}/code", json={"manifest": sha256(b"nope")}).status_code == 400
     assert httpx.get(f"{server.url}/api/runs/{rid}/code").status_code == 404
+
+
+# ---------------------------------------------------------------- sharing without code
+def test_share_tokens_hide_code(cdir, tmp_path, monkeypatch):
+    import httpx
+    from chronist.server.tokens import TokenStore
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    store = TokenStore(str(tmp_path / "tokens.json"))
+    store.add("w", "write")
+    srv = LiveServer(str(tmp_path / "data"), tokens=store).start()
+    try:
+        r = small_proj(tmp_path)
+        run = chronist.init(project="p", url=srv.url, token="w", code=str(r))
+        run.finish()
+        W = {"Authorization": "Bearer w"}
+        mk = lambda code: httpx.post(f"{srv.url}/api/tokens", headers=W, json={"code": code, "label": "x"}).json()
+        no_code, with_code = mk(False)["token"], mk(True)["token"]
+        assert json.loads((tmp_path / "tokens.json").read_text())[no_code]["code"] is False  # persisted
+        h = lambda t: {"Authorization": f"Bearer {t}"}
+        man = httpx.get(f"{srv.url}/api/runs/{run.id}/code", headers=W).json()
+        fh = man["files"][0].get("sha256") or man["files"][1]["sha256"]
+        for path in (f"/api/runs/{run.id}/code", f"/api/runs/{run.id}/code/file?path=model.py", f"/api/blobs/{fh}"):
+            rr = httpx.get(srv.url + path, headers=h(no_code))
+            assert rr.status_code == 403 and rr.json()["error"] == "code not shared", path
+            assert httpx.get(srv.url + path, headers=h(with_code)).status_code == 200, path
+        # run records don't leak snapshot details either
+        rec = httpx.get(f"{srv.url}/api/runs/{run.id}", headers=h(no_code)).json()
+        assert "code" not in rec["meta"] and rec["code"] is None
+        lst = httpx.get(f"{srv.url}/api/runs", headers=h(no_code)).json()["runs"][0]
+        assert "code" not in lst["meta"]
+        assert "code" in httpx.get(f"{srv.url}/api/runs/{run.id}", headers=h(with_code)).json()["meta"]
+        # metrics still work; read tokens can't manage shares or upload blobs
+        assert httpx.post(f"{srv.url}/api/series", headers=h(no_code), json={"runs": [run.id], "keys": ["x"]}).status_code == 200
+        assert httpx.post(f"{srv.url}/api/tokens", headers=h(with_code), json={}).status_code == 403
+        assert httpx.get(f"{srv.url}/api/tokens", headers=h(with_code)).status_code == 403
+        assert httpx.post(f"{srv.url}/api/blobs/missing", headers=h(with_code), json={"hashes": []}).status_code == 403
+        assert httpx.get(f"{srv.url}/api/whoami", headers=h(no_code)).json() == {"auth": True, "role": "read", "code": False}
+        # python read-back with a no-code token: run works, code access says why it fails
+        ref = chronist.run(run.id, url=srv.url, token=no_code)
+        assert ref.name == run._info.get("name") or ref.name
+        with pytest.raises(PermissionError):
+            ref.code
+        # list + revoke
+        listed = httpx.get(f"{srv.url}/api/tokens", headers=W).json()["tokens"]
+        assert {t["code"] for t in listed} == {True, False} and all("token" not in t for t in listed)
+        tid = next(t["id"] for t in listed if not t["code"])
+        assert httpx.delete(f"{srv.url}/api/tokens/{tid}", headers=W).status_code == 200
+        assert httpx.get(f"{srv.url}/api/runs", headers=h(no_code)).status_code == 401
+    finally:
+        srv.stop()
+
+
+def test_cannot_create_share_tokens_without_auth(server):
+    import httpx
+    r = httpx.post(f"{server.url}/api/tokens", json={"code": False})
+    assert r.status_code == 400 and "without authentication" in r.json()["error"]
+    assert httpx.get(f"{server.url}/api/whoami").json() == {"auth": False, "role": "write", "code": True}
+
+
+def test_legacy_tokens_file(tmp_path):
+    from chronist.server.tokens import TokenStore
+    (tmp_path / "t.json").write_text(json.dumps({"a": "write", "b": "read"}))
+    s = TokenStore(str(tmp_path / "t.json"))
+    assert s.lookup("a")["code"] is True and s.lookup("b")["code"] is False and s.lookup("c") is None

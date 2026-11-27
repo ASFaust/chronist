@@ -131,7 +131,8 @@ export function CodeTab({ run }) {
         setOpen(new Set(parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/") + "/")));
         setSel(first);
       }
-    }).catch((e) => setErr(e.status === 404 ? "This run has no code snapshot." : e.message));
+    }).catch((e) => setErr(e.status === 404 ? "This run has no code snapshot."
+      : e.status === 403 ? "Code isn't shared with this link." : e.message));
   }, [run.id]);
 
   const shown = useMemo(() => {

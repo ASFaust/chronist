@@ -108,11 +108,18 @@ chronist.example.org {
 }
 ```
 
-Without `--token` on a non-localhost bind, the server generates a write and a
-read token, stores them in `<data>/tokens.json` and prints them
-(`chronist tokens --new read` makes more). A localhost-bound server without
-tokens is reachable through `ssh -L 7070:localhost:7070 vps`. Share a
-read-only view as `https://chronist.example.org/?token=<read-token>#...`.
+Without `--token` on a non-localhost bind, the server generates a write
+token, stores it in `<data>/tokens.json` and prints it. A localhost-bound
+server without tokens is reachable through `ssh -L 7070:localhost:7070 vps`.
+
+**Sharing:** the UI's **Share** button (shown to write-token holders) creates
+a read-only link to the current view. **Share code as well** is off by
+default. Without it, the link's token can't read code snapshots (manifests,
+files, blobs, snapshot metadata) through the UI, the API or Python. Links are
+listed and revocable in the same dialog and take effect immediately. CLI
+equivalent: `chronist tokens --new read [--code] [--label L]`, `chronist tokens`,
+`chronist tokens --revoke <id>`. A server in local no-auth mode can't share,
+because anyone who can reach it sees everything.
 
 Clients: `export CHRONIST_URL=https://chronist.example.org CHRONIST_TOKEN=<write-token>`.
 
@@ -175,7 +182,7 @@ dir (`~/.chronist/data`, read-only, safe while a server is running). Pass
 | `chronist ui [--data DIR] [--port N] [--no-browser] [--no-watch]` | local server + UI, no auth |
 | `chronist serve [--host H] [--port N] [--token T] [--read-token R] [--no-auth]` | server for remote use |
 | `chronist sync [PATH...] [--url U] [--token T]` | upload offline/backlogged runs |
-| `chronist tokens [--new write\|read] [--revoke T]` | manage server tokens |
+| `chronist tokens [--new write\|read] [--code] [--label L] [--revoke ID]` | manage server/share tokens |
 | `chronist checkout <run> [dir] [--force]` | restore a run's code snapshot |
 | `chronist code diff <a> <b> [--stat]` | code + config diff of two runs |
 | `chronist snapshot [--code C] [--run ID]` | standalone snapshot (optionally attach to a run) |

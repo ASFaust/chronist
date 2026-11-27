@@ -6,6 +6,7 @@ import { RunTable } from "./table.js";
 import { Panel } from "./plot.js";
 import { RunDrawer } from "./drawer.js";
 import { Modal } from "./widgets.js";
+import { ShareModal } from "./share.js";
 import { SlotAllocator, cmpValues, newPanel, readHashState, runFieldValue, throttle, writeHashState, debounce } from "./util.js";
 
 const PLOT_DEFAULT_N = 20;  // with no selection, plot the first N matching runs
@@ -33,6 +34,8 @@ function App() {
   const [expanded, setExpanded] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [auth, setAuth] = useState(null);
+  const [me, setMe] = useState({ auth: false, role: null, code: false });
+  const [share, setShare] = useState(false);
   const [live, setLive] = useState({ seq: 0, runs: null });
   const [split, setSplit] = useState(init.split || 38);
   const [theme, setTheme] = useState(() => { try { return localStorage.getItem(THEME_KEY) || "auto"; } catch { return "auto"; } });
@@ -49,7 +52,8 @@ function App() {
       if (!project && r.projects.length) setProject(r.projects[0].name);
     } catch (e) { if (!(e instanceof AuthError)) console.error(e); }
   }, [project]);
-  useEffect(() => { loadProjects(); }, []);
+  const loadMe = () => api.whoami().then(setMe).catch(() => {});
+  useEffect(() => { loadProjects(); loadMe(); }, []);
 
   // ---- runs + keys ----
   const runsAbort = useRef(null);
@@ -205,10 +209,12 @@ run.finish()</pre>
             <span class="bulk">
               <b>${selected.size}</b> selected
               <button class="btn small ghost" onClick=${() => setSelected(new Set())} title="Clear selection">Clear</button>
-              <button class="btn small ghost" onClick=${bulkTag}>Tag…</button>
-              <button class="btn small ghost danger" onClick=${bulkDelete}>Delete…</button>
+              ${me.role === "write" && html`<button class="btn small ghost" onClick=${bulkTag}>Tag…</button>
+              <button class="btn small ghost danger" onClick=${bulkDelete}>Delete…</button>`}
             </span>`}
           <a class="btn small ghost" href=${api.exportUrl(project, q, [], "parquet")} title="Download matching runs as Parquet">Export</a>
+          ${me.role === "write" && html`<button class="btn small" onClick=${() => setShare(true)} title="Create a read-only link to this view">Share</button>`}
+          ${me.auth && me.role === "read" && html`<span class="chip" title=${me.code ? "Read-only link, code included" : "Read-only link, code not shared"}>read-only${me.code ? " · code" : ""}</span>`}
           <select class="theme" value=${theme} onChange=${(e) => setThemeChoice(e.target.value)} title="Theme">
             <option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option>
           </select>
@@ -235,9 +241,10 @@ run.finish()</pre>
               onChange=${(patch) => updatePanel(p.id, patch)} onRemove=${() => removePanel(p.id)} />`)}
         </div>
       </section>
-      ${drawer != null && html`<${RunDrawer} runId=${drawer} onClose=${() => setDrawer(null)}
+      ${share && html`<${ShareModal} me=${me} onClose=${() => setShare(false)} />`}
+      ${drawer != null && html`<${RunDrawer} runId=${drawer} canCode=${me.code !== false} canEdit=${me.role === "write"} onClose=${() => setDrawer(null)}
           onChanged=${loadRuns} onDeleted=${(id) => { setDrawer(null); const s = new Set(selected); s.delete(id); setSelected(s); loadRuns(); }} />`}
-      ${auth && html`<${TokenModal} status=${auth} onDone=${() => { setAuth(null); loadProjects(); loadRuns(); loadKeys(); }} />`}
+      ${auth && html`<${TokenModal} status=${auth} onDone=${() => { setAuth(null); loadProjects(); loadRuns(); loadKeys(); loadMe(); }} />`}
     </div>`;
 }
 

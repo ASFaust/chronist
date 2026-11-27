@@ -19,6 +19,7 @@ export function getToken() { return safeGet(TOKEN_KEY); }
 export function setToken(t) { safeSet(TOKEN_KEY, t || null); }
 
 export class AuthError extends Error {}
+export const CODE_HIDDEN = "code not shared";
 export class ApiError extends Error {
   constructor(msg, status, pos) { super(msg); this.status = status; this.pos = pos; }
 }
@@ -32,12 +33,13 @@ async function request(method, path, body, signal) {
   if (t) headers["Authorization"] = "Bearer " + t;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
+  let data;
+  try { data = await r.json(); } catch { data = {}; }
+  if (r.status === 403 && data.error === CODE_HIDDEN) throw new ApiError(CODE_HIDDEN, 403);
   if (r.status === 401 || r.status === 403) {
     onAuthNeeded(r.status);
     throw new AuthError(r.status === 401 ? "token required" : "read-only token");
   }
-  let data;
-  try { data = await r.json(); } catch { data = {}; }
   if (!r.ok) throw new ApiError(data.error || r.statusText, r.status, data.pos);
   return data;
 }
@@ -47,6 +49,10 @@ async function requestText(path) {
   const t = getToken();
   if (t) headers["Authorization"] = "Bearer " + t;
   const r = await fetch(path, { headers });
+  if (r.status === 403) {
+    let e = {}; try { e = await r.clone().json(); } catch {}
+    if (e.error === CODE_HIDDEN) throw new ApiError(CODE_HIDDEN, 403);
+  }
   if (r.status === 401 || r.status === 403) { onAuthNeeded(r.status); throw new AuthError("token required"); }
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch {} throw new ApiError(m, r.status); }
   return r.text();
@@ -69,6 +75,10 @@ export const api = {
   patch: (id, body) => request("PATCH", `/api/runs/${id}`, body),
   del: (id) => request("DELETE", `/api/runs/${id}`),
   code: (id) => request("GET", `/api/runs/${id}/code`),
+  whoami: () => request("GET", "/api/whoami"),
+  tokens: () => request("GET", "/api/tokens"),
+  createToken: (body) => request("POST", "/api/tokens", body),
+  revokeToken: (id) => request("DELETE", `/api/tokens/${id}`),
   codeFile: (id, path) => requestText(`/api/runs/${id}/code/file` + qs({ path })),
   exportUrl: (project, q, keys, format) => "/api/export" + qs({ project, q, keys: (keys || []).join(","), format, token: getToken() }),
 };

@@ -5,7 +5,7 @@ import { StatusBadge } from "./table.js";
 import { CodeTab } from "./code.js";
 import { fmtAgo, fmtDuration, fmtNum, fmtValue } from "./util.js";
 
-export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
+export function RunDrawer({ runId, onClose, onChanged, onDeleted, canCode = true, canEdit = true }) {
   const [run, setRun] = useState(null);
   const [err, setErr] = useState(null);
   const [name, setName] = useState("");
@@ -51,14 +51,14 @@ export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
     ["git branch", m.git_branch], ["git remote", m.git_remote],
     ["cwd", m.cwd],
     ["code root", m.code && m.code.root ? `${m.code.root} (${m.code.mode}, ${m.code.chosen_by})` : null],
-    ["code snapshot", m.code ? (m.code.aborted ? "aborted: " + m.code.aborted : m.code.manifest ? `${m.code.files} files, manifest ${m.code.manifest.slice(0, 12)}` : null) : "off"],
+    ["code snapshot", !canCode ? "not shared with this link" : m.code ? (m.code.aborted ? "aborted: " + m.code.aborted : m.code.manifest ? `${m.code.files} files, manifest ${m.code.manifest.slice(0, 12)}` : null) : "off"],
     ["command", m.command ? m.command.join(" ") : null],
   ].filter((r) => r[1]);
 
   return html`
     <aside class=${"drawer" + (tab === "code" ? " wide" : "")} aria-label="Run details">
       <div class="drawer-head">
-        <input class="input title-input" value=${name} onInput=${(e) => setName(e.target.value)}
+        <input class="input title-input" value=${name} disabled=${!canEdit} onInput=${(e) => setName(e.target.value)}
           onBlur=${() => name !== run.name && name.trim() && patch({ name: name.trim() })}
           onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
         <${StatusBadge} status=${run.status} />
@@ -67,15 +67,15 @@ export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
       ${err && html`<div class="query-error">${err}</div>`}
       <div class="drawer-sec">
         <div class="tagrow">
-          ${run.tags.map((t) => html`<span class="tag">${t}<button title="Remove tag" onClick=${() => patch({ remove_tags: [t] })}>×</button></span>`)}
-          <input class="input tag-input" placeholder="+ tag" value=${tag} onInput=${(e) => setTag(e.target.value)}
-            onKeyDown=${(e) => { if (e.key === "Enter" && tag.trim()) { patch({ add_tags: [tag.trim()] }); setTag(""); } }} />
+          ${run.tags.map((t) => html`<span class="tag">${t}${canEdit && html`<button title="Remove tag" onClick=${() => patch({ remove_tags: [t] })}>×</button>`}</span>`)}
+          ${canEdit && html`<input class="input tag-input" placeholder="+ tag" value=${tag} onInput=${(e) => setTag(e.target.value)}
+            onKeyDown=${(e) => { if (e.key === "Enter" && tag.trim()) { patch({ add_tags: [tag.trim()] }); setTag(""); } }} />`}
         </div>
-        <textarea class="input notes" placeholder="Notes…" value=${notes} onInput=${(e) => setNotes(e.target.value)}
+        <textarea class="input notes" placeholder="Notes…" value=${notes} disabled=${!canEdit} onInput=${(e) => setNotes(e.target.value)}
           onBlur=${() => notes !== (run.notes || "") && patch({ notes })}></textarea>
       </div>
       <div class="tabs">
-        ${["config", "summary", "code", "meta"].map((t) => html`<button class=${"tab" + (tab === t ? " on" : "")} onClick=${() => setTab(t)}>${t}</button>`)}
+        ${["config", "summary", ...(canCode ? ["code"] : []), "meta"].map((t) => html`<button class=${"tab" + (tab === t ? " on" : "")} onClick=${() => setTab(t)}>${t}</button>`)}
       </div>
       <div class=${"drawer-body" + (tab === "code" ? " flush" : "")}>
         ${tab === "config" && html`<table class="kv">${Object.entries(run.config).map(([k, v]) => html`<tr><th>${k}</th><td>${fmtValue(v)}</td></tr>`)}
@@ -85,7 +85,7 @@ export function RunDrawer({ runId, onClose, onChanged, onDeleted }) {
         ${tab === "meta" && html`<table class="kv">${metaRows.map(([k, v]) => html`<tr><th>${k}</th><td class="mono">${v}</td></tr>`)}</table>`}
       </div>
       <div class="drawer-foot">
-        <button class="btn danger" onClick=${del}>Delete run</button>
+        ${canEdit && html`<button class="btn danger" onClick=${del}>Delete run</button>`}
       </div>
     </aside>`;
 }

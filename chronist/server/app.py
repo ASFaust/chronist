@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gzip
-import hmac
 import io
 import json
 import logging
@@ -22,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 
 from ..blobs import valid_hash
 from ..query import QueryError
+from .tokens import TokenStore, from_dict as token_store_from_dict
 from ..store import Buckets
 from .core import Core, decode_points
 
@@ -30,7 +30,7 @@ log = logging.getLogger("chronist.server")
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "static")
 
 # Endpoints that are reads even though they are POST.
-READ_POSTS = {"/api/series", "/api/blobs/missing"}
+READ_POSTS = {"/api/series"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -103,24 +103,25 @@ def run_id_param(request: Request) -> int:
 
 
 # ---------------------------------------------------------------- auth
-class AuthMiddleware:
-    """Bearer tokens: 'write' tokens may do anything, 'read' tokens only reads.
-    No tokens configured -> auth off (local mode)."""
+CODE_HIDDEN = "code not shared"
 
-    def __init__(self, app, tokens: Dict[str, str]):
+
+class AuthMiddleware:
+    """Bearer tokens: 'write' tokens may do anything, 'read' tokens only reads
+    (and code only if the token carries the code flag). No tokens configured
+    -> auth off (local mode). The store is consulted per request, so tokens
+    created or revoked at runtime take effect immediately."""
+
+    def __init__(self, app, tokens: TokenStore):
         self.app = app
         self.tokens = tokens
 
-    def _role(self, token: Optional[str]) -> Optional[str]:
-        if not token:
-            return None
-        for t, role in self.tokens.items():
-            if hmac.compare_digest(t.encode(), token.encode()):
-                return role
-        return None
-
     async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or not self.tokens or not scope["path"].startswith("/api/"):
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            return await self.app(scope, receive, send)
+        state = scope.setdefault("state", {})
+        if not self.tokens.enabled:
+            state.update(role="write", code=True, auth=False)
             return await self.app(scope, receive, send)
         req = Request(scope)
         token = None
@@ -128,20 +129,42 @@ class AuthMiddleware:
         if auth.lower().startswith("bearer "):
             token = auth[7:].strip()
         token = token or req.query_params.get("token")
-        role = self._role(token)
+        entry = self.tokens.lookup(token)
         is_read = scope["method"] in ("GET", "HEAD") or scope["path"] in READ_POSTS
-        if role is None or (role == "read" and not is_read):
-            status = 401 if role is None else 403
+        if entry is None or (entry["role"] == "read" and not is_read):
+            status = 401 if entry is None else 403
             resp = JSONResponse({"error": "unauthorized" if status == 401 else "read-only token"}, status)
             return await resp(scope, receive, send)
-        scope.setdefault("state", {})["role"] = role
+        state.update(role=entry["role"], code=entry["code"], auth=True)
         return await self.app(scope, receive, send)
 
 
+def can_see_code(request: Request) -> bool:
+    return bool(request.scope.get("state", {}).get("code", True))
+
+
+def is_writer(request: Request) -> bool:
+    return request.scope.get("state", {}).get("role", "write") == "write"
+
+
+def strip_code(run: dict) -> dict:
+    """Remove code-snapshot details from a run record (for no-code tokens)."""
+    meta = run.get("meta")
+    if isinstance(meta, dict) and "code" in meta:
+        run["meta"] = {k: v for k, v in meta.items() if k != "code"}
+    if run.get("code"):
+        run["code"] = None
+    return run
+
+
 # ---------------------------------------------------------------- app
-def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
-               crash_check_interval: float = 30.0) -> Starlette:
-    tokens = tokens or {}
+def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0) -> Starlette:
+    """tokens: a TokenStore, or {token: role | entry} for an in-memory store."""
+    if not isinstance(tokens, TokenStore):
+        tokens = token_store_from_dict(tokens)
+
+    def code_forbidden():
+        return JSONResponse({"error": CODE_HIDDEN}, 403)
 
     async def submit(fn, *args):
         return await asyncio.wrap_future(core.writer.submit(fn, *args))
@@ -214,7 +237,10 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
         offset = qint(request, "offset", 0)
         page = ids[offset:offset + limit] if limit is not None else ids[offset:]
         include = [i for i in p.get("include", "config,summary,tags").split(",") if i]
-        return respond(request, {"total": total, "runs": core.meta.get_runs(page, include)})
+        runs = core.meta.get_runs(page, include)
+        if not can_see_code(request):
+            runs = [strip_code(r) for r in runs]
+        return respond(request, {"total": total, "runs": runs})
 
     @threaded
     def get_run(request):
@@ -223,6 +249,8 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
         if run is None:
             return JSONResponse({"error": f"run {rid} not found"}, 404)
         run["keys"] = core.store.keys(rid)
+        if not can_see_code(request):
+            strip_code(run)
         return respond(request, run)
 
     @threaded
@@ -365,6 +393,8 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
 
     @threaded
     def get_blob(request):
+        if not can_see_code(request):
+            return code_forbidden()
         h = request.path_params["hash"]
         if not valid_hash(h):
             return JSONResponse({"error": "bad hash"}, 400)
@@ -380,6 +410,8 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
 
     @threaded
     def get_code(request):
+        if not can_see_code(request):
+            return code_forbidden()
         m = core.manifest(run_id_param(request))
         if m is None:
             return JSONResponse({"error": "no code snapshot for this run"}, 404)
@@ -388,6 +420,8 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
     @threaded
     def get_code_file(request):
         """Raw content of one file (or env/packages blob) of a run's snapshot."""
+        if not can_see_code(request):
+            return code_forbidden()
         rid = run_id_param(request)
         m = core.manifest(rid)
         if m is None:
@@ -405,7 +439,39 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
                         headers={"Cache-Control": "private, max-age=86400"})
 
     async def health(request):
-        return JSONResponse({"ok": True, "auth": bool(tokens)})
+        return JSONResponse({"ok": True, "auth": tokens.enabled})
+
+    async def whoami(request):
+        st = request.scope.get("state", {})
+        return JSONResponse({"auth": tokens.enabled, "role": st.get("role"), "code": st.get("code")})
+
+    # ---- share tokens (write tokens only) ----
+    async def list_tokens(request):
+        if not is_writer(request):
+            return JSONResponse({"error": "needs a write token"}, 403)
+        return JSONResponse({"auth": tokens.enabled, "tokens": [t for t in tokens.list() if t["role"] == "read"]})
+
+    async def create_token(request):
+        if not tokens.enabled:
+            raise ApiError(400, "this server runs without authentication (local mode); start it with "
+                                "`chronist serve` and tokens to share views")
+        if not is_writer(request):
+            return JSONResponse({"error": "needs a write token"}, 403)
+        body = await read_body(request)
+        label = str(body.get("label") or "")[:100]
+        t = tokens.create("read", code=bool(body.get("code", False)), label=label)
+        from .tokens import token_id
+        return JSONResponse({"token": t, "id": token_id(t), "code": bool(body.get("code", False)), "label": label})
+
+    async def revoke_token(request):
+        if not is_writer(request):
+            return JSONResponse({"error": "needs a write token"}, 403)
+        ident = request.path_params["id"]
+        listed = {t["id"]: t for t in tokens.list()}
+        if ident not in listed or listed[ident]["role"] != "read":
+            return JSONResponse({"error": "no such share token"}, 404)
+        tokens.revoke(ident)
+        return JSONResponse({"ok": True})
 
     async def index(request):
         path = os.path.join(STATIC_DIR, "index.html")
@@ -415,6 +481,10 @@ def create_app(core: Core, tokens: Optional[Dict[str, str]] = None,
 
     routes = [
         Route("/api/health", handle(health)),
+        Route("/api/whoami", handle(whoami)),
+        Route("/api/tokens", handle(list_tokens), methods=["GET"]),
+        Route("/api/tokens", handle(create_token), methods=["POST"]),
+        Route("/api/tokens/{id}", handle(revoke_token), methods=["DELETE"]),
         Route("/api/projects", handle(projects)),
         Route("/api/runs", handle(create_run), methods=["POST"]),
         Route("/api/runs", handle(list_runs), methods=["GET"]),

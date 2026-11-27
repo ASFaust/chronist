@@ -188,6 +188,8 @@ class _RemoteSource:
         r = self.http.get(f"/api/runs/{run_id}/code")
         if r.status_code == 404:
             return None
+        if r.status_code == 403 and "code not shared" in r.text:
+            raise PermissionError("code snapshots are not shared with this token")
         _raise(r)
         import msgpack
         return msgpack.unpackb(r.content, raw=False, strict_map_key=False)
