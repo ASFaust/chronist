@@ -40,7 +40,10 @@ def sync_run(rd: RunDir, url: str, token: Optional[str] = None, mark_dead_crashe
     try:
         if up.prog.get("gone"):
             return {"uid": rd.info()["uid"], "skipped": "deleted on server"}
+        from .files import process_staged
+        process_staged(rd)  # files a dead process never chunked
         sent = up.upload_pending()
+        up.upload_files()
         info = rd.info()
         status = None
         if mark_dead_crashed and rd.finished() is None:

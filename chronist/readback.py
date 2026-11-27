@@ -172,6 +172,23 @@ class _LocalSource:
     def blob(self, h: str) -> Optional[bytes]:
         return self.blobs.read(h)
 
+    def list_files(self, run_id: int) -> List[dict]:
+        return self.meta.list_files(run_id)
+
+    def file_info(self, version_id: int) -> dict:
+        import json
+        f = self.meta.get_file(version_id)
+        if f is None:
+            raise KeyError(f"file version {version_id} not found")
+        m = json.loads(self.blobs.read(f["manifest"]))
+        return {**f, "chunk_hashes": m["chunks"], "chunk_size": m["chunk_size"]}
+
+    def file_chunk(self, version_id: int, i: int, h: str) -> bytes:
+        data = self.blobs.get(h)
+        if data is None:
+            raise RuntimeError(f"chunk {h} missing from the local data dir")
+        return data
+
     def close(self):
         self.store.close()
         self.meta.close()
@@ -253,6 +270,24 @@ class _RemoteSource:
         _raise(r)
         import msgpack
         return msgpack.unpackb(r.content, raw=False, strict_map_key=False)
+
+    def list_files(self, run_id: int) -> List[dict]:
+        return self._get(f"/api/runs/{run_id}/files")["files"]
+
+    def file_info(self, version_id: int) -> dict:
+        return self._get(f"/api/files/{version_id}")
+
+    def file_chunk(self, version_id: int, i: int, h: str) -> bytes:
+        for attempt in range(5):
+            try:
+                r = self.http.get(f"/api/files/{version_id}/chunk/{i}")
+                _raise(r)
+                return r.content
+            except Exception:
+                if attempt == 4:
+                    raise
+                import time as _t
+                _t.sleep(0.5 * 2 ** attempt)
 
     def blob(self, h: str) -> Optional[bytes]:
         from .codec import decompress
@@ -499,6 +534,57 @@ class RunRef:
     def history(self, keys=None, max_points=None, start=None, end=None):
         return RunSet(self._src, [self.data], self._df).history(keys, max_points, start, end)
 
+    # ---- files ----
+    def files(self, raw: bool = False):
+        """All file versions: name, version_id, step, kind, size, aliases, metadata, created."""
+        rows = self._src.list_files(self.id)
+        if raw:
+            return rows
+        cols = {c: [r.get(c) for r in rows] for c in ("name", "version_id", "step", "kind", "size", "aliases",
+                                                       "metadata", "created", "sha256", "filename")}
+        return _frame(cols, self._df or _default_backend())
+
+    def _resolve_file(self, name: str, alias: Optional[str], step: Optional[int], version: Optional[int]) -> dict:
+        rows = [r for r in self._src.list_files(self.id) if r["name"] == name]
+        if not rows:
+            raise KeyError(f"run {self.id} has no file named {name!r}")
+        if version is not None:
+            hit = [r for r in rows if r["version_id"] == version]
+        elif step is not None:
+            hit = sorted([r for r in rows if r["step"] == step], key=lambda r: r["created"])[-1:]
+        else:
+            alias = alias or "latest"
+            hit = [r for r in rows if alias in r["aliases"]]
+        if not hit:
+            raise KeyError(f"no version of {name!r} matches (alias={alias}, step={step}, version={version})")
+        return hit[0]
+
+    def download(self, name: str, alias: Optional[str] = None, step: Optional[int] = None,
+                 version: Optional[int] = None, dest: str = ".") -> str:
+        """Download a file version (default: alias "latest"); returns the local path.
+        Chunks are cached by hash (``$CHRONIST_CACHE``, default ~/.cache/chronist),
+        so repeated or interrupted downloads only fetch what's missing; the
+        whole-file sha256 is verified."""
+        f = self._resolve_file(name, alias, step, version)
+        as_dir = dest.endswith(("/", os.sep))  # check before abspath strips it
+        dest = os.path.abspath(os.path.expanduser(dest))
+        if os.path.isdir(dest) or as_dir:
+            os.makedirs(dest, exist_ok=True)
+            dest = os.path.join(dest, f.get("filename") or f["name"].replace("/", "_"))
+        return _download(self._src, f, dest)
+
+    def load_object(self, name: str, alias: Optional[str] = None, step: Optional[int] = None,
+                    version: Optional[int] = None, **load_kwargs):
+        """Inverse of save_object: torch.load or pickle.load of the version."""
+        f = self._resolve_file(name, alias, step, version)
+        path = _download(self._src, f, os.path.join(cache_dir(), "files", f["sha256"]))
+        if f.get("serializer") == "torch":
+            import torch
+            return torch.load(path, **load_kwargs)
+        import pickle
+        with open(path, "rb") as fh:
+            return pickle.load(fh, **load_kwargs)
+
     def histograms(self, key: str, max_steps: Optional[int] = None, start: Optional[int] = None,
                    end: Optional[int] = None):
         """HistList of records (``.to_dense(rows)``)."""
@@ -548,3 +634,47 @@ def code_diff(a, b, *, url: Optional[str] = None, token: Optional[str] = None,
     out["config"] = {"added": sorted(set(cb) - set(ca)), "removed": sorted(set(ca) - set(cb)),
                      "changed": {k: [ca[k], cb[k]] for k in sorted(set(ca) & set(cb)) if ca[k] != cb[k]}}
     return out
+
+
+def cache_dir() -> str:
+    return os.environ.get("CHRONIST_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "chronist")
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for buf in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            h.update(buf)
+    return h.hexdigest()
+
+
+def _download(src, f: dict, dest: str) -> str:
+    """Assemble a file version at ``dest`` via the chunk cache; verify sha256."""
+    import hashlib
+
+    from .blobs import FsBlobStore
+    from .codec import decompress
+    if os.path.exists(dest) and os.path.getsize(dest) == f["size"] and _sha256_file(dest) == f["sha256"]:
+        return dest  # already here
+    info = src.file_info(f["version_id"])
+    cache = FsBlobStore(os.path.join(cache_dir(), "blobs"))
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    tmp = dest + ".part"
+    whole = hashlib.sha256()
+    with open(tmp, "wb") as out:
+        for i, h in enumerate(info["chunk_hashes"]):
+            data = cache.read(h)
+            if data is None:
+                stored = src.file_chunk(f["version_id"], i, h)
+                data = decompress(stored)
+                if hashlib.sha256(data).hexdigest() != h:
+                    raise IOError(f"chunk {i} of {f['name']!r} failed verification")
+                cache.put(h, stored, verify=False)
+            whole.update(data)
+            out.write(data)
+    if whole.hexdigest() != f["sha256"]:
+        os.remove(tmp)
+        raise IOError(f"{f['name']!r}: sha256 mismatch after download")
+    os.replace(tmp, dest)
+    return dest

@@ -43,13 +43,17 @@ def uploaded_to(rd: RunDir) -> List[str]:
     segs = rd.segments()
     if not segs:
         return []
+    from .files import staged
+    files = staged(rd)
     last, size = segs[-1], os.path.getsize(rd.segment_path(segs[-1]))
     out = []
     for url, prog in _all_progress(rd).items():
         if prog.get("gone"):
             continue
         done = (finished and prog.get("finish_sent")) or prog.get("crash_sent")  # crash_sent: sync marked it
-        if done and prog.get("code_done") and prog.get("seg") == last and prog.get("offset") == size:
+        files_ok = all(e.get("state") == "ready" and e["local_id"] in set(prog.get("files_done", []))
+                       for e in files)
+        if done and files_ok and prog.get("code_done") and prog.get("seg") == last and prog.get("offset") == size:
             out.append(url)
     return out
 
@@ -57,17 +61,22 @@ def uploaded_to(rd: RunDir) -> List[str]:
 def _referenced_blobs(rundirs: Iterable[RunDir], store: FsBlobStore) -> Set[str]:
     from .code import manifest_blobs
     refs: Set[str] = set()
+    from .files import file_manifest_hashes
     for rd in rundirs:
         try:
             mh = ((rd.info().get("meta") or {}).get("code") or {}).get("manifest")
         except (OSError, ValueError):
             continue
-        if not mh:
-            continue
-        refs.add(mh)
-        raw = store.read(mh)
-        if raw is not None:
-            refs.update(manifest_blobs(json.loads(raw)))
+        if mh:
+            refs.add(mh)
+            raw = store.read(mh)
+            if raw is not None:
+                refs.update(manifest_blobs(json.loads(raw)))
+        for fh in file_manifest_hashes(rd):  # file chunks
+            refs.add(fh)
+            raw = store.read(fh)
+            if raw is not None:
+                refs.update(json.loads(raw).get("chunks", []))
     return refs
 
 

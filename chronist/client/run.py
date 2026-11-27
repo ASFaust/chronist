@@ -141,6 +141,8 @@ class Run:
                  resume: bool, start_step: int, rewind: Optional[int] = None,
                  histogram_bins: int = DEFAULT_BINS, auto_histograms: bool = True):
         self._hist_cfg = HistConfig(histogram_bins)
+        self._files = None
+        self._file_policies: Dict[str, dict] = {}
         self._auto_hist = auto_histograms
         self.dir = rundir
         self._info = info
@@ -239,6 +241,63 @@ class Run:
                 self._writer.append(["h", s, now, recs])
             self._step = max(self._step, s + 1)
 
+    # ---- files ----
+    def _file_worker(self):
+        if self._files is None:
+            from .files import FileWorker
+            self._files = FileWorker(self.dir)
+            if self._uploader is not None:
+                self._files.on_ready = self._uploader.wake
+        return self._files
+
+    def save_file(self, path, name: Optional[str] = None, step: Optional[int] = None, kind: str = "other",
+                  aliases: Iterable[str] = (), metadata: Optional[dict] = None, move: bool = False,
+                  link: bool = False) -> dict:
+        """Attach a file (checkpoint, plot, output). The content is captured now:
+        overwriting ``path`` afterwards does not change this version. Chunking,
+        hashing and upload happen in the background.
+
+        name: logical name grouping versions (default: the file's basename)
+        aliases: e.g. ["best"]; "latest" is maintained automatically
+        move: move instead of copy; link: hard-link (only if you never modify
+        the source file in place afterwards)."""
+        from .files import stage_file
+        if self._finished:
+            raise RuntimeError("run is finished")
+        e = stage_file(self.dir, path, name, step, kind, aliases, metadata, move=move, link=link)
+        self._attach_policy(e)
+        self._file_worker().submit(e)
+        return {k: e[k] for k in ("local_id", "name", "step", "kind", "size")}
+
+    def save_object(self, obj: Any, name: str, step: Optional[int] = None, kind: str = "checkpoint",
+                    aliases: Iterable[str] = (), metadata: Optional[dict] = None) -> dict:
+        """Serialize ``obj`` (torch.save if torch is imported, else pickle) as a file version."""
+        from .files import stage_object
+        if self._finished:
+            raise RuntimeError("run is finished")
+        e = stage_object(self.dir, obj, name, step, kind, aliases, metadata)
+        self._attach_policy(e)
+        self._file_worker().submit(e)
+        return {k: e[k] for k in ("local_id", "name", "step", "kind", "size")}
+
+    def configure_files(self, name: str, keep_last: Optional[int] = None, keep_every: Optional[int] = None) -> None:
+        """Retention for versions of ``name`` (applied on the server): keep the
+        newest ``keep_last`` versions plus the first version in every
+        ``keep_every``-step window. Versions with an alias are always kept."""
+        for v in (keep_last, keep_every):
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 1):
+                raise ValueError("keep_last / keep_every must be positive ints")
+        self._file_policies[name] = {"keep_last": keep_last, "keep_every": keep_every}
+
+    def _attach_policy(self, e: dict) -> None:
+        pol = self._file_policies.get(e["name"])
+        if pol:
+            from .rundir import write_json_atomic
+            meta = {k: v for k, v in e.items() if k != "dir"}
+            meta["retention"] = pol
+            write_json_atomic(os.path.join(e["dir"], "meta.json"), meta)
+            e["retention"] = pol
+
     def configure_histograms(self, pattern: str, bins: Optional[int] = None,
                              range: Optional[tuple] = None, raw: Optional[bool] = None) -> None:
         """Defaults for histogram keys matching a glob (``"grad/*"``). Precedence:
@@ -252,6 +311,9 @@ class Run:
         if self._finished:
             return
         self._finished = True
+        if self._files is not None:
+            self._files.drain()  # every saved file chunked before the final upload
+            self._files.stop()
         self._recheck_imports()
         self._writer.append(["f", status, time.time()])
         self._writer.close()

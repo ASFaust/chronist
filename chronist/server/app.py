@@ -23,7 +23,7 @@ from ..blobs import valid_hash
 from ..query import QueryError
 from .tokens import TokenStore, from_dict as token_store_from_dict
 from ..store import Buckets
-from .core import Core, decode_hists, decode_points
+from .core import Core, QuotaError, decode_hists, decode_points
 
 log = logging.getLogger("chronist.server")
 
@@ -177,7 +177,7 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
         async def endpoint(request: Request):
             try:
                 return await fn(request)
-            except ApiError as e:
+            except (ApiError, QuotaError) as e:
                 return JSONResponse({"error": e.msg}, e.status)
             except QueryError as e:
                 return JSONResponse({"error": str(e), "pos": e.pos}, 400)
@@ -466,7 +466,11 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
         hashes = body.get("hashes") or []
         if not isinstance(hashes, list) or not all(isinstance(h, str) and valid_hash(h) for h in hashes):
             raise ApiError(400, "hashes must be a list of sha256 hex strings")
-        return respond(request, {"missing": core.blobs.missing(hashes)})
+        missing = core.blobs.missing(hashes)
+        if body.get("purpose") == "file" and missing:
+            await asyncio.get_running_loop().run_in_executor(core.pool, core.check_file_upload,
+                                                             int(body.get("size") or 0))
+        return respond(request, {"missing": missing})
 
     async def put_blob(request):
         h = request.path_params["hash"]
@@ -530,6 +534,103 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
             return JSONResponse({"error": "needs a write token"}, 403)
         body = await read_body(request)
         return respond(request, await submit(core.op_gc, bool(body.get("vacuum", False))))
+
+    # ---- files ----
+    async def register_file(request):
+        body = await read_body(request)
+        return respond(request, await submit(core.op_register_file, run_id_param(request), str(body.get("manifest", "")),
+                                             body.get("local_id"), body.get("retention")))
+
+    @threaded
+    def list_files(request):
+        rid = run_id_param(request)
+        if core.meta.get_run(rid) is None:
+            return JSONResponse({"error": f"run {rid} not found"}, 404)
+        return respond(request, {"files": core.meta.list_files(rid)})
+
+    async def set_aliases(request):
+        body = await read_body(request)
+        set_ = body.get("set") or {}
+        remove = body.get("remove") or []
+        if not isinstance(set_, dict) or not isinstance(remove, list):
+            raise ApiError(400, "body: {set: {alias: version_id}, remove: [alias]}")
+        return respond(request, await submit(core.op_set_aliases, run_id_param(request),
+                                             request.path_params["name"], set_, remove))
+
+    async def delete_file(request):
+        try:
+            vid = int(request.path_params["version"])
+        except ValueError:
+            raise ApiError(400, "bad version id")
+        return respond(request, await submit(core.op_delete_file, run_id_param(request), vid))
+
+    def _version(request) -> dict:
+        try:
+            vid = int(request.path_params["version_id"])
+        except ValueError:
+            raise ApiError(400, "bad version id")
+        f = core.meta.get_file(vid)
+        if f is None:
+            raise KeyError(f"file version {vid} not found")
+        return f
+
+    @threaded
+    def file_info(request):
+        f = _version(request)
+        m = json.loads(core.blobs.read(f["manifest"]))
+        return respond(request, {**f, "chunks": len(m["chunks"]), "chunk_size": m["chunk_size"],
+                                 "chunk_hashes": m["chunks"]})
+
+    @threaded
+    def file_chunk(request):
+        f = _version(request)
+        data = core.file_chunk(f["version_id"], int(request.path_params["i"]))
+        if data is None:
+            return JSONResponse({"error": "no such chunk"}, 404)
+        return Response(data, media_type="application/octet-stream",
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+    @threaded
+    def file_download(request):
+        """The whole file, assembled from chunks; supports a single HTTP Range."""
+        from ..codec import decompress
+        f = _version(request)
+        m = json.loads(core.blobs.read(f["manifest"]))
+        size, cs = int(m["size"]), int(m["chunk_size"])
+        start, end = 0, size - 1
+        status = 200
+        rng = request.headers.get("range")
+        if rng and size:
+            import re as _re
+            mm = _re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
+            if not mm or (not mm.group(1) and not mm.group(2)):
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            if mm.group(1):
+                start = int(mm.group(1))
+                end = int(mm.group(2)) if mm.group(2) else size - 1
+            else:  # suffix range
+                start = max(0, size - int(mm.group(2)))
+            end = min(end, size - 1)
+            if start > end:
+                return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+            status = 206
+
+        def gen():
+            pos = start
+            while pos <= end:
+                i = pos // cs
+                chunk = decompress(core.blobs.get(m["chunks"][i]))
+                off = pos - i * cs
+                piece = chunk[off: off + (end - pos + 1)]
+                yield piece
+                pos += len(piece)
+        name = (f.get("filename") or f["name"]).replace('"', "")
+        headers = {"Accept-Ranges": "bytes", "Content-Length": str(end - start + 1 if size else 0),
+                   "ETag": f'"{m["sha256"]}"', "Content-Disposition": f'attachment; filename="{name}"'}
+        if status == 206:
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        return StreamingResponse(gen() if size else iter([b""]), status_code=status,
+                                 media_type="application/octet-stream", headers=headers)
 
     async def health(request):
         return JSONResponse({"ok": True, "auth": tokens.enabled})
@@ -597,6 +698,13 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
         Route("/api/runs/{run_id}/code", handle(set_code), methods=["POST"]),
         Route("/api/runs/{run_id}/code", handle(get_code), methods=["GET"]),
         Route("/api/runs/{run_id}/code/file", handle(get_code_file), methods=["GET"]),
+        Route("/api/runs/{run_id}/files", handle(register_file), methods=["POST"]),
+        Route("/api/runs/{run_id}/files", handle(list_files), methods=["GET"]),
+        Route("/api/runs/{run_id}/files/{name:path}/aliases", handle(set_aliases), methods=["PATCH"]),
+        Route("/api/runs/{run_id}/files/{name:path}/{version}", handle(delete_file), methods=["DELETE"]),
+        Route("/api/files/{version_id}", handle(file_info), methods=["GET"]),
+        Route("/api/files/{version_id}/chunk/{i:int}", handle(file_chunk), methods=["GET"]),
+        Route("/api/files/{version_id}/download", handle(file_download), methods=["GET"]),
         Route("/api/keys", handle(keys)),
         Route("/api/suggest", handle(suggest)),
         Route("/api/series", handle(series), methods=["POST"]),

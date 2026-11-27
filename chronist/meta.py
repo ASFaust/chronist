@@ -70,6 +70,37 @@ CREATE TABLE IF NOT EXISTS hist_keys (
     last_step INTEGER NOT NULL,
     PRIMARY KEY (run_id, key)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS files (
+    version_id INTEGER PRIMARY KEY,
+    run_id     INTEGER NOT NULL,
+    local_id   TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    step       INTEGER,
+    kind       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    sha256     TEXT NOT NULL,
+    manifest   TEXT NOT NULL,
+    filename   TEXT,
+    serializer TEXT,
+    metadata   TEXT NOT NULL DEFAULT '{}',
+    created    REAL NOT NULL,
+    UNIQUE (run_id, local_id)
+);
+CREATE INDEX IF NOT EXISTS files_run_name ON files(run_id, name);
+CREATE TABLE IF NOT EXISTS file_aliases (
+    run_id     INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    alias      TEXT NOT NULL,
+    version_id INTEGER NOT NULL,
+    PRIMARY KEY (run_id, name, alias)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS file_policies (
+    run_id     INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    keep_last  INTEGER,
+    keep_every INTEGER,
+    PRIMARY KEY (run_id, name)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS run_code (
     run_id   INTEGER PRIMARY KEY,
     manifest TEXT NOT NULL
@@ -357,7 +388,8 @@ class MetadataStore:
 
     def delete_run(self, run_id: int) -> None:
         with self.transaction() as con:
-            for t in ("config", "tags", "summary", "run_code", "hist_keys"):
+            for t in ("config", "tags", "summary", "run_code", "hist_keys", "files", "file_aliases",
+                      "file_policies"):
                 con.execute(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
             con.execute("DELETE FROM runs WHERE id=?", (run_id,))
 
@@ -368,6 +400,127 @@ class MetadataStore:
     def get_code(self, run_id: int) -> Optional[str]:
         row = self._r().execute("SELECT manifest FROM run_code WHERE run_id=?", (run_id,)).fetchone()
         return row[0] if row else None
+
+    # ---- files ----
+    FILE_COLS = ("version_id, run_id, local_id, name, step, kind, size, sha256, manifest, filename, serializer, "
+                 "metadata, created")
+
+    def _file_row(self, row) -> dict:
+        d = dict(zip([c.strip() for c in self.FILE_COLS.split(",")], row))
+        d["metadata"] = json.loads(d["metadata"])
+        return d
+
+    def add_file_version(self, run_id: int, local_id: str, manifest_hash: str, m: dict) -> Tuple[int, bool]:
+        """Register a version (idempotent per local_id). Returns (version_id, new)."""
+        with self.transaction() as con:
+            row = con.execute("SELECT version_id FROM files WHERE run_id=? AND local_id=?",
+                              (run_id, local_id)).fetchone()
+            if row:
+                return row[0], False
+            con.execute(f"INSERT INTO files({self.FILE_COLS}) VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (run_id, local_id, m["name"], m.get("step"), m.get("file_kind") or "other", int(m["size"]),
+                         m["sha256"], manifest_hash, m.get("filename"), m.get("serializer"),
+                         json.dumps(m.get("metadata") or {}, default=str), float(m.get("created") or time.time())))
+            vid = con.execute("SELECT version_id FROM files WHERE run_id=? AND local_id=?",
+                              (run_id, local_id)).fetchone()[0]
+            for a in m.get("aliases") or []:
+                self._set_alias(con, run_id, m["name"], a, vid)
+            self._update_latest(con, run_id, m["name"])
+            return vid, True
+
+    @staticmethod
+    def _set_alias(con, run_id, name, alias, vid):
+        con.execute("INSERT OR REPLACE INTO file_aliases VALUES (?,?,?,?)", (run_id, name, alias, vid))
+
+    @staticmethod
+    def _update_latest(con, run_id, name):
+        row = con.execute("SELECT version_id FROM files WHERE run_id=? AND name=? ORDER BY created DESC, "
+                          "version_id DESC LIMIT 1", (run_id, name)).fetchone()
+        if row is None:
+            con.execute("DELETE FROM file_aliases WHERE run_id=? AND name=? AND alias='latest'", (run_id, name))
+        else:
+            con.execute("INSERT OR REPLACE INTO file_aliases VALUES (?,?,'latest',?)", (run_id, name, row[0]))
+
+    def set_file_aliases(self, run_id: int, name: str, set_: Dict[str, int], remove: Iterable[str]) -> None:
+        with self.transaction() as con:
+            for alias, vid in set_.items():
+                if alias == "latest":
+                    raise ValueError("'latest' is maintained automatically")
+                ok = con.execute("SELECT 1 FROM files WHERE version_id=? AND run_id=? AND name=?",
+                                 (int(vid), run_id, name)).fetchone()
+                if not ok:
+                    raise KeyError(f"no version {vid} of {name!r} in run {run_id}")
+                self._set_alias(con, run_id, name, alias, int(vid))
+            for alias in remove:
+                if alias == "latest":
+                    raise ValueError("'latest' is maintained automatically")
+                con.execute("DELETE FROM file_aliases WHERE run_id=? AND name=? AND alias=?", (run_id, name, alias))
+
+    def delete_file_versions(self, run_id: int, version_ids: Iterable[int]) -> List[str]:
+        """Remove versions (and aliases pointing at them). Returns affected names.
+        Blobs are left for the mark-and-sweep GC."""
+        names = set()
+        with self.transaction() as con:
+            for vid in version_ids:
+                row = con.execute("SELECT name FROM files WHERE version_id=? AND run_id=?", (int(vid), run_id)).fetchone()
+                if row is None:
+                    continue
+                names.add(row[0])
+                con.execute("DELETE FROM files WHERE version_id=?", (int(vid),))
+                con.execute("DELETE FROM file_aliases WHERE version_id=?", (int(vid),))
+            for n in names:
+                self._update_latest(con, run_id, n)
+        return sorted(names)
+
+    def set_file_policy(self, run_id: int, name: str, keep_last: Optional[int], keep_every: Optional[int]) -> None:
+        with self.transaction() as con:
+            con.execute("INSERT OR REPLACE INTO file_policies VALUES (?,?,?,?)", (run_id, name, keep_last, keep_every))
+
+    def retention_victims(self, run_id: int, name: str) -> List[int]:
+        """Versions the (run, name) policy says to drop. Aliased versions never are."""
+        con = self.w
+        pol = con.execute("SELECT keep_last, keep_every FROM file_policies WHERE run_id=? AND name=?",
+                          (run_id, name)).fetchone()
+        if pol is None or (pol[0] is None and pol[1] is None):
+            return []
+        keep_last, keep_every = pol
+        vers = con.execute("SELECT version_id, step, created FROM files WHERE run_id=? AND name=? "
+                           "ORDER BY created, version_id", (run_id, name)).fetchall()
+        keep = {r[0] for r in con.execute("SELECT version_id FROM file_aliases WHERE run_id=? AND name=?",
+                                          (run_id, name))}
+        if keep_last:
+            keep.update(v[0] for v in vers[-keep_last:])
+        if keep_every:
+            first_in_window: Dict[int, Tuple[int, int]] = {}
+            for vid, step, _ in vers:
+                if step is None:
+                    continue
+                w = step // keep_every
+                if w not in first_in_window or step < first_in_window[w][1]:
+                    first_in_window[w] = (vid, step)
+            keep.update(v for v, _ in first_in_window.values())
+        return [v[0] for v in vers if v[0] not in keep]
+
+    def list_files(self, run_id: int) -> List[dict]:
+        con = self._r()
+        aliases: Dict[int, List[str]] = {}
+        for vid, alias in con.execute("SELECT version_id, alias FROM file_aliases WHERE run_id=? ORDER BY alias",
+                                      (run_id,)):
+            aliases.setdefault(vid, []).append(alias)
+        out = []
+        for row in con.execute(f"SELECT {self.FILE_COLS} FROM files WHERE run_id=? ORDER BY name, created",
+                               (run_id,)):
+            d = self._file_row(row)
+            d["aliases"] = aliases.get(d["version_id"], [])
+            out.append(d)
+        return out
+
+    def get_file(self, version_id: int) -> Optional[dict]:
+        row = self._r().execute(f"SELECT {self.FILE_COLS} FROM files WHERE version_id=?", (int(version_id),)).fetchone()
+        return None if row is None else self._file_row(row)
+
+    def file_manifests(self) -> List[str]:
+        return [r[0] for r in self.w.execute("SELECT DISTINCT manifest FROM files")]
 
     def mark_crashed(self, timeout: float) -> List[int]:
         cutoff = time.time() - timeout

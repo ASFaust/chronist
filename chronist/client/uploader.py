@@ -106,6 +106,62 @@ class Uploader:
         self.prog["code_blobs_sent"] = len(missing)
         self._save()
 
+    def upload_files(self, budget_s: Optional[float] = None) -> int:
+        """Upload ready files (missing chunks only), oldest first. With a time
+        budget, returns early so metric uploads keep priority; progress is
+        per chunk on the server, so the next call resumes where this stopped."""
+        from ..blobs import FsBlobStore
+        from .files import staged
+        done = set(self.prog.get("files_done", []))
+        todo = [e for e in staged(self.rd) if e.get("state") == "ready" and e["local_id"] not in done]
+        if not todo:
+            return 0
+        store = FsBlobStore(self.rd.blobs_dir)
+        t0 = time.time()
+        rate = float(os.environ.get("CHRONIST_UPLOAD_MBPS", "0") or 0) * 1e6 / 8  # bytes/s
+        sent_bytes, n = 0, 0
+        for e in todo:
+            raw = store.read(e["manifest"])
+            if raw is None:
+                log.warning("chronist: manifest of file %s missing locally; skipping", e["name"])
+                continue
+            import json as _json
+            chunks = _json.loads(raw)["chunks"]
+            r = self.http.post("/api/blobs/missing", json={"hashes": list(dict.fromkeys(chunks + [e["manifest"]])),
+                                                           "purpose": "file", "size": e["size"]})
+            if r.status_code == 507 or r.status_code == 413:
+                msg = r.json().get("error", r.text)
+                if not self.prog.get("file_refused_warned"):
+                    log.warning("chronist: server refused file %s: %s (metrics continue)", e["name"], msg)
+                    self.prog["file_refused_warned"] = True
+                continue
+            r.raise_for_status()
+            for h in r.json()["missing"]:
+                data = store.get(h)
+                if data is None:
+                    raise RuntimeError(f"chunk {h} of {e['name']} missing locally")
+                t = time.time()
+                self.http.put(f"/api/blobs/{h}", content=data,
+                              headers={"Content-Type": "application/octet-stream"}).raise_for_status()
+                sent_bytes += len(data)
+                if rate:
+                    wait = sent_bytes / rate - (time.time() - t0)
+                    if wait > 0:
+                        time.sleep(wait)
+                if budget_s is not None and time.time() - t0 > budget_s:
+                    return n  # resume next round, after metrics
+            res = self._post(f"/api/runs/{self.run_id}/files",
+                             {"manifest": e["manifest"], "local_id": e["local_id"],
+                              "retention": e.get("retention")})
+            self.prog.setdefault("files_done", []).append(e["local_id"])
+            self.prog.setdefault("file_versions", {})[e["local_id"]] = res.get("version_id")
+            self._save()
+            self.last_contact = time.time()
+            n += 1
+            if budget_s is not None and time.time() - t0 > budget_s:
+                break
+        return n
+
     def upload_pending(self) -> int:
         """Upload everything currently on disk. Returns number of points sent."""
         if self.prog.get("gone"):
@@ -221,6 +277,7 @@ class BackgroundUploader(threading.Thread):
                         self.up.ensure_run(resume=self.resume)
                         created = True
                     self.up.upload_pending()
+                    self.up.upload_files(budget_s=None if stopping else 5.0)
                     if time.time() - self.up.last_contact > self.heartbeat_every:
                         self.up.heartbeat()
                 self.error = None

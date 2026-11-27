@@ -90,6 +90,13 @@ def open_hist_store(data_dir: str, readonly: bool = False):
     return SqliteHistStore(path, readonly=readonly)
 
 
+class QuotaError(Exception):
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status = status
+        self.msg = msg
+
+
 # ---------------------------------------------------------------- writer
 class Writer:
     """The only thread that writes to storage. Everything else submits ops."""
@@ -194,13 +201,18 @@ def decode_points(payload: dict) -> Dict[str, Series]:
 # ---------------------------------------------------------------- core
 class Core:
     def __init__(self, data_dir: str, metric_store: Optional[str] = None,
-                 heartbeat_timeout: float = 180.0, cache_mb: float = 64.0):
+                 heartbeat_timeout: float = 180.0, cache_mb: float = 64.0, blob_dir: Optional[str] = None,
+                 max_blob_storage: Optional[int] = None, max_file_size: int = 20 * 10 ** 9):
         self.data_dir = os.path.abspath(os.path.expanduser(data_dir))
         os.makedirs(self.data_dir, exist_ok=True)
         self._lock = lock_data_dir(self.data_dir)  # the server is the only writer, enforced
         self.meta, store, self.cfg = open_data_dir(self.data_dir, metric_store=metric_store)
         self.store = CachingStore(store, max_mb=cache_mb)
-        self.blobs = FsBlobStore(os.path.join(self.data_dir, "blobs"))
+        self.blobs = FsBlobStore(blob_dir or os.path.join(self.data_dir, "blobs"))
+        self.max_blob_storage = max_blob_storage  # bytes; None = unlimited
+        self.max_file_size = max_file_size
+        self._blob_usage: Optional[int] = None
+        self._quota_warned = False
         self.hists = open_hist_store(self.data_dir)
         self.writer = Writer()
         self.events = Broadcaster()
@@ -312,8 +324,96 @@ class Core:
         return {"ok": True}
 
     def op_put_blob(self, h: str, data: bytes) -> dict:
+        existed = self.blobs.has(h)
         self.blobs.put(h, data)  # verifies the hash
+        if not existed and self._blob_usage is not None:
+            self._blob_usage += len(data)
         return {"ok": True}
+
+    # ---- blob storage quota ----
+    def blob_usage(self) -> int:
+        if self._blob_usage is None:
+            total = 0
+            if os.path.isdir(self.blobs.path):
+                for root, _, names in os.walk(self.blobs.path):
+                    for n in names:
+                        try:
+                            total += os.path.getsize(os.path.join(root, n))
+                        except OSError:
+                            pass
+            self._blob_usage = total
+        return self._blob_usage
+
+    def check_file_upload(self, size: int) -> None:
+        """Raise QuotaError if a new file of ``size`` bytes may not be stored."""
+        if size > self.max_file_size:
+            raise QuotaError(413, f"file is {size / 1e9:.2f} GB; the server limit is {self.max_file_size / 1e9:.2f} GB")
+        if self.max_blob_storage:
+            used = self.blob_usage()
+            if used + size > self.max_blob_storage:
+                raise QuotaError(507, f"blob storage quota reached ({used / 1e9:.2f} of "
+                                      f"{self.max_blob_storage / 1e9:.2f} GB); file uploads are paused, metrics still work")
+            if used > 0.8 * self.max_blob_storage and not self._quota_warned:
+                self._quota_warned = True
+                log.warning("blob storage at %.0f%% of quota", 100 * used / self.max_blob_storage)
+
+    # ---- files ----
+    def op_register_file(self, run_id: int, manifest: str, local_id: str, retention: Optional[dict]) -> dict:
+        project = self._check_run(run_id)
+        if not valid_hash(manifest):
+            raise ValueError("bad manifest hash")
+        if not isinstance(local_id, str) or not local_id:
+            raise ValueError("local_id is required")
+        raw = self.blobs.read(manifest)
+        if raw is None:
+            raise ValueError("manifest blob not uploaded")
+        m = json.loads(raw)
+        if m.get("kind") != "chronist.file/1":
+            raise ValueError("not a file manifest")
+        if m["size"] > self.max_file_size:
+            raise QuotaError(413, "file exceeds the server's max file size")
+        missing = self.blobs.missing(m["chunks"])
+        if missing:
+            raise ValueError(f"{len(missing)} chunks of {m['name']!r} are missing")
+        vid, new = self.meta.add_file_version(run_id, local_id, manifest, m)
+        dropped: List[int] = []
+        if retention:
+            kl, ke = retention.get("keep_last"), retention.get("keep_every")
+            for v in (kl, ke):
+                if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 1):
+                    raise ValueError("retention values must be positive ints")
+            self.meta.set_file_policy(run_id, m["name"], kl, ke)
+        victims = self.meta.retention_victims(run_id, m["name"])
+        if victims:
+            self.meta.delete_file_versions(run_id, victims)
+            dropped = victims
+        self.events.publish({"type": "files", "project": project, "run_id": run_id})
+        return {"version_id": vid, "new": new, "dropped": dropped}
+
+    def op_delete_file(self, run_id: int, version_id: int) -> dict:
+        project = self._check_run(run_id)
+        f = self.meta.get_file(version_id)
+        if f is None or f["run_id"] != run_id:
+            raise KeyError(f"no file version {version_id} in run {run_id}")
+        self.meta.delete_file_versions(run_id, [version_id])
+        self.events.publish({"type": "files", "project": project, "run_id": run_id})
+        return {"ok": True}
+
+    def op_set_aliases(self, run_id: int, name: str, set_: dict, remove: list) -> dict:
+        project = self._check_run(run_id)
+        self.meta.set_file_aliases(run_id, name, set_ or {}, remove or [])
+        self.events.publish({"type": "files", "project": project, "run_id": run_id})
+        return {"ok": True}
+
+    def file_chunk(self, version_id: int, i: int) -> Optional[bytes]:
+        """Stored (codec-tagged) bytes of chunk i of a file version."""
+        f = self.meta.get_file(version_id)
+        if f is None:
+            return None
+        m = json.loads(self.blobs.read(f["manifest"]))
+        if not 0 <= i < len(m["chunks"]):
+            return None
+        return self.blobs.get(m["chunks"][i])
 
     def op_set_code(self, run_id: int, manifest: str) -> dict:
         project = self._check_run(run_id)
@@ -342,11 +442,16 @@ class Core:
         flight are not attached yet), then give free pages back to the OS."""
         from ..client.code import manifest_blobs
         refs = set()
-        for mh in self.meta.manifests():
+        for mh in self.meta.manifests():  # code snapshots
             refs.add(mh)
             raw = self.blobs.read(mh)
             if raw is not None:
                 refs.update(manifest_blobs(json.loads(raw)))
+        for mh in self.meta.file_manifests():  # file versions
+            refs.add(mh)
+            raw = self.blobs.read(mh)
+            if raw is not None:
+                refs.update(json.loads(raw)["chunks"])
         cutoff = time.time() - grace_s
         removed = freed = 0
         if os.path.isdir(self.blobs.path):
@@ -367,6 +472,8 @@ class Core:
                         freed += st.st_size
                     except FileNotFoundError:
                         pass
+        if self._blob_usage is not None:
+            self._blob_usage = max(0, self._blob_usage - freed)
         before = _dir_size(self.data_dir)
         self.meta.vacuum(full=vacuum)
         if hasattr(self.store, "vacuum"):
