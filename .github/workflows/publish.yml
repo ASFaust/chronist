@@ -2,8 +2,8 @@ name: publish
 
 # Every push to main: test -> next version -> build -> PyPI -> tag + GitHub Release.
 #
-#   patch bump by default; "[minor]" or "[major]" in any pushed commit message
-#   bumps more; "[skip release]" publishes nothing (tests still run).
+#   patch bump by default; "[minor]" or "[major]" in the subject line of any
+#   pushed commit bumps more; "[skip release]" there publishes nothing.
 #   Manual runs (Actions tab -> publish -> Run workflow) can pick the bump.
 #
 # The tag is pushed only after PyPI accepted the upload, so a failed publish
@@ -41,8 +41,8 @@ jobs:
           fetch-depth: 0
       - id: next
         env:
-          # all commit messages of this push (env, not inline: no shell injection)
-          COMMIT_MESSAGE: ${{ join(github.event.commits.*.message, ' ') }}
+          # all commit messages of this push as JSON (env, not inline: no shell injection)
+          COMMIT_MESSAGES: ${{ toJSON(github.event.commits.*.message) }}
           BUMP: ${{ inputs.bump }}
         run: |
           last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)

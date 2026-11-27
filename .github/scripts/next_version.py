@@ -1,13 +1,26 @@
 """Decide the next release version for a push to main.
 
 Usage: next_version.py <last-tag-or-empty> <head-tag-or-empty>
-Reads the pushed commit message from $COMMIT_MESSAGE (passed via env to
-avoid shell injection) and an optional $BUMP override (patch|minor|major).
+Reads the pushed commit messages from $COMMIT_MESSAGES (a JSON list, passed
+via env to avoid shell injection) and an optional $BUMP override
+(patch|minor|major). Markers ([major], [minor], [skip release]) count only in
+a commit's subject line, so describing them in a body doesn't trigger them.
 Prints "version=X.Y.Z" and "release=true|false" lines for $GITHUB_OUTPUT.
 """
+import json
 import os
 import re
 import sys
+
+
+def subjects(raw: str) -> str:
+    try:
+        msgs = json.loads(raw) if raw.strip() else []
+    except ValueError:
+        msgs = [raw]
+    if isinstance(msgs, str):
+        msgs = [msgs]
+    return "\n".join((m or "").strip().splitlines()[0] if (m or "").strip() else "" for m in msgs)
 
 
 def next_version(last: str, msg: str, override: str = "") -> str:
@@ -24,7 +37,7 @@ def next_version(last: str, msg: str, override: str = "") -> str:
 def main() -> None:
     last = sys.argv[1] if len(sys.argv) > 1 else ""
     head_tag = sys.argv[2] if len(sys.argv) > 2 else ""
-    msg = os.environ.get("COMMIT_MESSAGE", "")
+    msg = subjects(os.environ.get("COMMIT_MESSAGES", ""))
     override = os.environ.get("BUMP", "").strip()
     if override not in ("", "patch", "minor", "major"):
         sys.exit(f"invalid BUMP={override!r}")

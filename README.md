@@ -325,8 +325,8 @@ tests every push and PR there). Every push to `main` runs
 
 1. tests on Python 3.9–3.13;
 2. the next version, from the latest `vX.Y.Z` tag: a patch bump by default,
-   `[minor]` or `[major]` in any pushed commit message bumps more, and
-   `[skip release]` releases nothing;
+   `[minor]` or `[major]` in the subject line of any pushed commit bumps
+   more, and `[skip release]` there releases nothing;
 3. build (the version comes from the tag via `setuptools-scm`) and upload to
    PyPI via trusted publishing;
 4. only then, push the tag and create the GitHub Release with generated notes.
