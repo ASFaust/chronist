@@ -143,6 +143,11 @@ export function newPanel(keys = [], extra = {}) {
            smooth: 0, logx: false, logy: false, band: true, colorBy: "", range: null, ...extra };
 }
 
+export function newHistPanel(key = "", extra = {}) {
+  return { id: Date.now().toString(36) + (_pid++), type: "hist", key, view: "heatmap", logColor: false,
+           range: null, step: null, ...extra };
+}
+
 export function runFieldValue(run, key) {
   if (key.startsWith("last(")) {
     const s = run.summary && run.summary[key.slice(5, -1)];

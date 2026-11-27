@@ -327,6 +327,24 @@ def common_range(records: Sequence[HistRecord]) -> Tuple[float, float]:
     return lo, hi
 
 
+def robust_range(records: Sequence[HistRecord], q: float = 0.005) -> Tuple[float, float]:
+    """Value range covering the [q, 1-q] quantiles of every record: heavy
+    tails don't squash the bulk of the distribution into one row."""
+    los, his = [], []
+    for r in records:
+        if r.count:
+            a, b = quantiles(r, [q, 1 - q])
+            if math.isfinite(a) and math.isfinite(b):
+                los.append(a)
+                his.append(b)
+    if not los:
+        return common_range(records)
+    lo, hi = min(los), max(his)
+    if lo == hi:
+        return common_range(records)
+    return lo, hi
+
+
 def to_dense(records: Sequence[HistRecord], rows: int = 128,
              y_range: Optional[Tuple[float, float]] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Re-bin records onto a common value grid: (steps x rows matrix, edges)."""

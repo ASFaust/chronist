@@ -203,7 +203,7 @@ export function Panel({ panel, runs, runsById, slots, keys, onChange, onRemove, 
   const onLive = useRef(throttle((changed) => incremental.current(changed), 1500)).current;
   const pendingChanged = useRef(new Set());
   useEffect(() => {
-    if (!live || !live.runs) return;
+    if (!live || !live.runs || !live.runs.size) return;
     if (live.full && runIds.some((id) => live.full.has(id))) { fetchFull(); return; }  // rewind: history changed
     let any = false;
     for (const id of live.runs) if (runIds.includes(id)) { pendingChanged.current.add(id); any = true; }

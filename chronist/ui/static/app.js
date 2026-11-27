@@ -4,10 +4,11 @@ import { api, openStream, setAuthHandler, setToken, getToken, AuthError } from "
 import { QueryInput } from "./query.js";
 import { RunTable } from "./table.js";
 import { Panel } from "./plot.js";
+import { HistPanel } from "./histplot.js";
 import { RunDrawer } from "./drawer.js";
 import { Modal } from "./widgets.js";
 import { ShareModal } from "./share.js";
-import { SlotAllocator, cmpValues, newPanel, readHashState, runFieldValue, throttle, writeHashState, debounce } from "./util.js";
+import { SlotAllocator, cmpValues, newPanel, newHistPanel, readHashState, runFieldValue, throttle, writeHashState, debounce } from "./util.js";
 
 const PLOT_DEFAULT_N = 20;  // with no selection, plot the first N matching runs
 const THEME_KEY = "chronist.theme";
@@ -26,7 +27,7 @@ function App() {
   const [qErr, setQErr] = useState(null);
   const [runs, setRuns] = useState([]);
   const [total, setTotal] = useState(0);
-  const [keys, setKeys] = useState({ config: [], metrics: [] });
+  const [keys, setKeys] = useState({ config: [], metrics: [], hists: [] });
   const [selected, setSelected] = useState(new Set(init.sel || []));
   const [cols, setCols] = useState(init.cols || []);
   const [sort, setSort] = useState(init.sort || { key: "created", desc: true });
@@ -78,8 +79,9 @@ function App() {
 
   // default panels: one per metric (up to 4) the first time a project is opened
   useEffect(() => {
-    if (panels === null && keys.metrics.length) {
-      setPanels(keys.metrics.slice(0, 4).map((m) => newPanel([m])));
+    if (panels === null && (keys.metrics.length || (keys.hists || []).length)) {
+      setPanels([...keys.metrics.slice(0, 4).map((m) => newPanel([m])),
+                 ...(keys.hists || []).slice(0, 1).map((k) => newHistPanel(k))]);
     }
   }, [keys, panels]);
 
@@ -91,13 +93,18 @@ function App() {
     return openStream(project, (evs) => {
       const changed = new Set();
       const rewound = new Set();
+      const hist = new Set();
       let runEv = false;
       for (const ev of evs) {
         if (ev.type === "points") changed.add(ev.run_id);
-        else if (ev.type === "rewind") { rewound.add(ev.run_id); changed.add(ev.run_id); runEv = true; }
+        else if (ev.type === "rewind") { rewound.add(ev.run_id); changed.add(ev.run_id); hist.add(ev.run_id); runEv = true; }
+        else if (ev.type === "hist") hist.add(ev.run_id);
         else runEv = true;
       }
-      if (changed.size) { setLive((l) => ({ seq: l.seq + 1, runs: changed, full: rewound })); reloadRunsSoon(); reloadKeysSoon(); }
+      if (changed.size || hist.size) {
+        setLive((l) => ({ seq: l.seq + 1, runs: changed, full: rewound, hist }));
+        reloadRunsSoon(); reloadKeysSoon();
+      }
       if (runEv) { reloadRunsSoon(); loadProjects(); }
     });
   }, [project, reloadRunsSoon]);
@@ -234,9 +241,13 @@ run.finish()</pre>
             : `Plotting the first ${plotRuns.length} matching runs (select runs to choose); grouped panels use all matches`}</span>
           <span class="spacer"></span>
           <button class="btn small" onClick=${() => setPanels([...(panels || []), newPanel(keys.metrics.slice(0, 1))])}>+ Panel</button>
+          ${(keys.hists || []).length > 0 && html`<button class="btn small ghost" onClick=${() => setPanels([...(panels || []), newHistPanel(keys.hists[0])])}>+ Histogram</button>`}
         </div>
         <div class="panels">
-          ${(panels || []).map((p) => html`
+          ${(panels || []).map((p) => p.type === "hist" ? html`
+            <${HistPanel} key=${p.id} panel=${p} runs=${plotRuns} slots=${slots} keys=${keys} live=${live}
+              expanded=${expanded === p.id} onExpand=${() => setExpanded(expanded === p.id ? null : p.id)}
+              onChange=${(patch) => updatePanel(p.id, patch)} onRemove=${() => removePanel(p.id)} />` : html`
             <${Panel} key=${p.id} panel=${p} runs=${p.group.length ? groupRuns : plotRuns} runsById=${runsById}
               slots=${slots} keys=${keys} live=${live}
               expanded=${expanded === p.id} onExpand=${() => setExpanded(expanded === p.id ? null : p.id)}

@@ -337,7 +337,7 @@ def create_app(core: Core, tokens=None, crash_check_interval: float = 30.0,
             return core.render_hist([int(r) for r in run_ids[:50]], key, body.get("start"), body.get("end"),
                                     body.get("max_steps", 300), body.get("rows", 128),
                                     None if yr is None else (float(yr[0]), float(yr[1])),
-                                    body.get("mode", "heatmap"), body.get("step"))
+                                    body.get("mode", "heatmap"), body.get("step"), bool(body.get("robust", True)))
         return respond(request, await asyncio.get_running_loop().run_in_executor(None, work))
 
     async def series(request):

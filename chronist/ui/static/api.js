@@ -72,6 +72,7 @@ export const api = {
   keys: (project) => request("GET", "/api/keys" + qs({ project })),
   suggest: (project, text, signal) => request("GET", "/api/suggest" + qs({ project, text }), undefined, signal),
   series: (body, signal) => request("POST", "/api/series", body, signal),
+  histRender: (body) => request("POST", "/api/hist/render", body),
   patch: (id, body) => request("PATCH", `/api/runs/${id}`, body),
   del: (id) => request("DELETE", `/api/runs/${id}`),
   code: (id) => request("GET", `/api/runs/${id}/code`),

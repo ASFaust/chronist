@@ -377,8 +377,8 @@ class Core:
                 "db_bytes_freed": max(0, before - after), "vacuum": "full" if vacuum else "incremental"}
 
     def render_hist(self, run_ids: List[int], key: str, start=None, end=None, max_steps: int = 300,
-                    rows: int = 128, y_range=None, mode: str = "heatmap", step=None) -> dict:
-        return render_hist(self.hists, run_ids, key, start, end, max_steps, rows, y_range, mode, step)
+                    rows: int = 128, y_range=None, mode: str = "heatmap", step=None, robust: bool = True) -> dict:
+        return render_hist(self.hists, run_ids, key, start, end, max_steps, rows, y_range, mode, step, robust)
 
     def op_mark_crashed(self) -> List[int]:
         ids = self.meta.mark_crashed(self.heartbeat_timeout)
@@ -573,7 +573,7 @@ def _stats(recs) -> dict:
 
 
 def render_hist(hists, run_ids: List[int], key: str, start=None, end=None, max_steps: int = 300,
-                rows: int = 128, y_range=None, mode: str = "heatmap", step=None) -> dict:
+                rows: int = 128, y_range=None, mode: str = "heatmap", step=None, robust: bool = True) -> dict:
     """Server-side histogram views for one key over several runs.
 
     heatmap:   per run a steps x rows density matrix on one shared value grid
@@ -601,14 +601,15 @@ def render_hist(hists, run_ids: List[int], key: str, start=None, end=None, max_s
     per_run = {rid: hists.read(rid, key, start, end, max_steps) for rid in run_ids}
     allrecs = [r for rs in per_run.values() for r in rs]
     if mode == "heatmap":
-        lo, hi = y_range or H.common_range(allrecs)
+        lo, hi = y_range or (H.robust_range(allrecs) if robust else H.common_range(allrecs))
         out["y_range"] = [lo, hi]
         out["rows"] = rows
         vmax = 0.0
         for rid, rs in per_run.items():
             m, _ = H.to_dense(rs, rows=rows, y_range=(lo, hi))
             vmax = max(vmax, float(m.max()) if m.size else 0.0)
-            out["runs"].append({"run_id": rid, "steps": [r.step for r in rs],
+            outside = [float(r.count - row.sum()) if r.count else 0.0 for r, row in zip(rs, m)]
+            out["runs"].append({"run_id": rid, "steps": [r.step for r in rs], "outside": outside,
                                 "matrix": np.round(m, 3).ravel().tolist(), **_stats(rs)})
         out["vmax"] = vmax
     elif mode == "quantiles":
